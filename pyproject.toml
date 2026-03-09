@@ -1,0 +1,9 @@
+[project]
+name = "maven-unittest-statistics"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "javalang>=0.13.0",
+    "tqdm>=4.67.3",
+]
