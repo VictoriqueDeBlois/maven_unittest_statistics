@@ -189,42 +189,90 @@ class JavaCodeAnalyzer:
 
         return False
 
-    def get_called_project_methods(self, method_node, tree: javalang.tree.CompilationUnit) -> List[str]:
+    def get_called_project_methods(self, method_node, tree: javalang.tree.CompilationUnit, class_node) -> List[str]:
         """获取调用的项目内方法列表"""
         called_methods = []
 
         # 构建导入映射（简化类名 -> 完整类名）
         import_map = {}
+        static_imports = set()  # 静态导入的方法
+
         if tree.imports:
             for imp in tree.imports:
-                parts = imp.path.split('.')
-                simple_name = parts[-1]
-                import_map[simple_name] = imp.path
+                if imp.static:
+                    # 静态导入，只记录项目内的类
+                    if imp.wildcard:
+                        # import static Class.*
+                        if self._is_project_class(imp.path):
+                            static_imports.add(imp.path)
+                    else:
+                        # import static Class.method
+                        parts = imp.path.split('.')
+                        class_name = '.'.join(parts[:-1])
+                        if self._is_project_class(class_name):
+                            static_imports.add(class_name)
+                else:
+                    # 普通导入
+                    parts = imp.path.split('.')
+                    if not imp.wildcard:
+                        simple_name = parts[-1]
+                        import_map[simple_name] = imp.path
 
-        # 添加当前包下的类
+        # 获取当前包名和类名
         package_name = tree.package.name if tree.package else ""
+        current_class_name = f"{package_name}.{class_node.name}" if package_name else class_node.name
 
         for path, node in method_node.filter(javalang.tree.MethodInvocation):
             qualifier = node.qualifier
             member = node.member
 
-            # 确定完整的方法签名
             full_method = None
 
             if qualifier:
                 # 有限定符，如 obj.method() 或 ClassName.method()
                 if qualifier in import_map:
-                    # 是导入的类
+                    # 是导入的类的静态方法调用
                     full_class = import_map[qualifier]
                     if self._is_project_class(full_class):
                         full_method = f"{full_class}.{member}"
+                elif qualifier == class_node.name:
+                    # 当前类的方法
+                    if self._is_project_class(current_class_name):
+                        full_method = f"{current_class_name}.{member}"
                 else:
-                    # 可能是对象调用，需要推断类型（复杂，暂时跳过）
-                    pass
+                    # 可能是对象调用或其他情况
+                    # 尝试在同包下查找类
+                    possible_class = f"{package_name}.{qualifier}" if package_name else qualifier
+                    if self._is_project_class(possible_class):
+                        full_method = f"{possible_class}.{member}"
             else:
-                # 无限定符，可能是当前类或父类的方法
-                # 暂时跳过
-                pass
+                # 无限定符，可能是：
+                # 1. 当前类的方法
+                # 2. 静态导入的方法
+                # 3. 同包下其他类的静态方法
+
+                # 排除测试框架的方法（断言、Mock等）
+                if member in self.JUNIT_ASSERTIONS or member in self.MOCKITO_VERIFY_METHODS or member in self.MOCKITO_MOCK_METHODS:
+                    continue
+
+                # 检查是否是静态导入的方法
+                for static_class in static_imports:
+                    if self._is_project_class(static_class):
+                        full_method = f"{static_class}.{member}"
+                        break
+
+                # 如果不是静态导入，可能是当前类或父类的方法
+                if not full_method and self._is_project_class(current_class_name):
+                    # 检查是否是当前类的方法
+                    is_current_class_method = False
+                    if class_node.methods:
+                        for m in class_node.methods:
+                            if m.name == member:
+                                is_current_class_method = True
+                                break
+
+                    if is_current_class_method:
+                        full_method = f"{current_class_name}.{member}"
 
             if full_method and full_method not in called_methods:
                 called_methods.append(full_method)
@@ -321,24 +369,82 @@ class JavaCodeAnalyzer:
 
             # 获取调用的项目内方法（包括展开的private方法）
             called_methods = []
+
+            # 构建导入映射
             import_map = {}
+            static_imports = set()
+
             if tree.imports:
                 for imp in tree.imports:
-                    parts = imp.path.split('.')
-                    simple_name = parts[-1]
-                    import_map[simple_name] = imp.path
+                    if imp.static:
+                        # 静态导入
+                        if imp.wildcard:
+                            # import static Class.* 的情况
+                            # 只记录项目内的类
+                            if self._is_project_class(imp.path):
+                                static_imports.add(imp.path)
+                        else:
+                            # import static Class.method 的情况
+                            parts = imp.path.split('.')
+                            class_name_import = '.'.join(parts[:-1])
+                            if self._is_project_class(class_name_import):
+                                static_imports.add(class_name_import)
+                    else:
+                        # 普通导入
+                        parts = imp.path.split('.')
+                        if not imp.wildcard:
+                            simple_name = parts[-1]
+                            import_map[simple_name] = imp.path
+
+            current_class_full = f"{package_name}.{class_node.name}" if package_name else class_node.name
 
             for _, node in expanded_nodes:
                 if isinstance(node, javalang.tree.MethodInvocation):
                     qualifier = node.qualifier
                     member = node.member
 
-                    if qualifier and qualifier in import_map:
-                        full_class = import_map[qualifier]
-                        if self._is_project_class(full_class):
-                            full_method = f"{full_class}.{member}"
-                            if full_method not in called_methods:
-                                called_methods.append(full_method)
+                    full_method = None
+
+                    if qualifier:
+                        # 有限定符的调用
+                        if qualifier in import_map:
+                            full_class = import_map[qualifier]
+                            if self._is_project_class(full_class):
+                                full_method = f"{full_class}.{member}"
+                        elif qualifier == class_node.name:
+                            if self._is_project_class(current_class_full):
+                                full_method = f"{current_class_full}.{member}"
+                        else:
+                            # 尝试同包下的类
+                            possible_class = f"{package_name}.{qualifier}" if package_name else qualifier
+                            if self._is_project_class(possible_class):
+                                full_method = f"{possible_class}.{member}"
+                    else:
+                        # 无限定符的调用
+                        # 排除断言和Mock方法（这些是测试框架的方法，不是项目方法）
+                        if member in self.JUNIT_ASSERTIONS or member in self.MOCKITO_VERIFY_METHODS or member in self.MOCKITO_MOCK_METHODS:
+                            continue
+
+                        # 检查静态导入
+                        for static_class in static_imports:
+                            if self._is_project_class(static_class):
+                                full_method = f"{static_class}.{member}"
+                                break
+
+                        # 检查当前类的方法
+                        if not full_method and self._is_project_class(current_class_full):
+                            is_current_class_method = False
+                            if class_node.methods:
+                                for m in class_node.methods:
+                                    if m.name == member:
+                                        is_current_class_method = True
+                                        break
+
+                            if is_current_class_method:
+                                full_method = f"{current_class_full}.{member}"
+
+                    if full_method and full_method not in called_methods:
+                        called_methods.append(full_method)
 
             return TestMetrics(
                 project_name=project_name,
@@ -575,7 +681,7 @@ def process_single_project(project_name: str, projects_root: Path) -> List[TestM
         return []
 
 
-def main(args=None):
+def main():
     """主函数"""
     import argparse
 
@@ -584,9 +690,10 @@ def main(args=None):
     parser.add_argument('--root', required=True, help='所有项目的根目录')
     parser.add_argument('--output', default='test_metrics.csv', help='输出CSV文件路径')
     parser.add_argument('--workers', type=int, default=4, help='并行处理的进程数')
+    parser.add_argument('--resume', action='store_true', help='断点续传模式：跳过已分析的项目')
+    parser.add_argument('--append', action='store_true', help='追加模式：在现有CSV文件后追加新结果')
 
-    if args is None:
-        args = parser.parse_args()
+    args = parser.parse_args()
 
     # 读取项目列表
     projects_file = Path(args.projects)
@@ -604,47 +711,88 @@ def main(args=None):
         logger.error(f"Projects root directory not found: {projects_root}")
         return
 
-    # 并行处理项目
-    all_metrics = []
+    output_file = Path(args.output)
 
-    with ProcessPoolExecutor(max_workers=args.workers) as executor:
-        # 提交所有任务
-        future_to_project = {
-            executor.submit(process_single_project, project_name, projects_root): project_name
-            for project_name in project_names
-        }
+    # 断点续传：读取已处理的项目
+    processed_projects = set()
+    if args.resume and output_file.exists():
+        logger.info("Resume mode: loading already processed projects...")
+        try:
+            with open(output_file, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    processed_projects.add(row['project_name'])
+            logger.info(f"Found {len(processed_projects)} already processed projects")
 
-        # 使用tqdm显示总体进度
-        with tqdm(total=len(project_names), desc="Processing projects") as pbar:
-            for future in as_completed(future_to_project):
-                project_name = future_to_project[future]
-                try:
-                    metrics = future.result()
-                    all_metrics.extend(metrics)
-                    logger.info(f"Completed {project_name}: {len(metrics)} test cases")
-                except Exception as e:
-                    logger.error(f"Error in project {project_name}: {e}")
-                finally:
-                    pbar.update(1)
+            # 过滤掉已处理的项目
+            original_count = len(project_names)
+            project_names = [p for p in project_names if p not in processed_projects]
+            logger.info(f"Skipping {original_count - len(project_names)} projects, {len(project_names)} remaining")
 
-    # 写入CSV
-    if all_metrics:
-        output_file = Path(args.output)
-        with open(output_file, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=[
-                'project_name', 'test_full_name', 'oracle_length',
-                'assertion_count', 'mock_verify_count', 'uses_mock',
-                'called_project_methods'
-            ])
-            writer.writeheader()
+        except Exception as e:
+            logger.warning(f"Failed to read existing results: {e}")
+            processed_projects = set()
 
-            for metrics in all_metrics:
-                writer.writerow(asdict(metrics))
+    if not project_names:
+        logger.info("All projects already processed!")
+        return
+
+    # 准备CSV文件
+    # 如果是追加模式且文件已存在，不写入header
+    write_header = not (args.append and output_file.exists())
+
+    # 打开CSV文件用于增量写入
+    csv_file = open(output_file, 'a' if args.append else 'w', newline='', encoding='utf-8')
+    csv_writer = csv.DictWriter(csv_file, fieldnames=[
+        'project_name', 'test_full_name', 'oracle_length',
+        'assertion_count', 'mock_verify_count', 'uses_mock',
+        'called_project_methods'
+    ])
+
+    if write_header:
+        csv_writer.writeheader()
+        csv_file.flush()  # 立即刷新到磁盘
+
+    total_test_cases = 0
+
+    try:
+        # 并行处理项目
+        with ProcessPoolExecutor(max_workers=args.workers) as executor:
+            # 提交所有任务
+            future_to_project = {
+                executor.submit(process_single_project, project_name, projects_root): project_name
+                for project_name in project_names
+            }
+
+            # 使用tqdm显示总体进度
+            with tqdm(total=len(project_names), desc="Processing projects") as pbar:
+                for future in as_completed(future_to_project):
+                    project_name = future_to_project[future]
+                    try:
+                        metrics = future.result()
+
+                        # 立即写入CSV（一个项目处理完就写入）
+                        for metric in metrics:
+                            csv_writer.writerow(asdict(metric))
+
+                        # 刷新到磁盘，确保数据不会丢失
+                        csv_file.flush()
+
+                        total_test_cases += len(metrics)
+                        logger.info(f"Completed {project_name}: {len(metrics)} test cases (total: {total_test_cases})")
+
+                    except Exception as e:
+                        logger.error(f"Error in project {project_name}: {e}")
+                    finally:
+                        pbar.update(1)
 
         logger.info(f"Results written to {output_file}")
-        logger.info(f"Total test cases analyzed: {len(all_metrics)}")
-    else:
-        logger.warning("No test cases found!")
+        logger.info(f"Total test cases analyzed: {total_test_cases}")
+
+    finally:
+        # 确保CSV文件被正确关闭
+        csv_file.close()
+        logger.info("CSV file closed")
 
 
 if __name__ == '__main__':
