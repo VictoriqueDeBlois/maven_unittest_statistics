@@ -10,30 +10,19 @@ Maven项目测试用例指标统计工具
 5. 调用的项目内方法列表
 """
 
-import os
-import re
 import csv
 import json
+import re
 import subprocess
-import logging
-from pathlib import Path
-from dataclasses import dataclass, asdict
-from typing import List, Set, Dict, Optional, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import List, Set, Dict, Optional
+
 import javalang
 from tqdm import tqdm
 
-
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('maven_test_metrics.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+from utils.logger_manager import get_logger
 
 
 @dataclass
@@ -74,6 +63,7 @@ class JavaCodeAnalyzer:
     def __init__(self, project_root: Path, project_packages: Set[str]):
         self.project_root = project_root
         self.project_packages = project_packages
+        self.logger = get_logger('maven_test_metrics.log', 'TestMetrics')
 
     def parse_java_file(self, file_path: Path) -> Optional[javalang.tree.CompilationUnit]:
         """解析Java文件为AST"""
@@ -82,7 +72,7 @@ class JavaCodeAnalyzer:
                 content = f.read()
             return javalang.parse.parse(content)
         except Exception as e:
-            logger.warning(f"Failed to parse {file_path}: {e}")
+            self.logger.warning(f"Failed to parse {file_path}: {e}")
             return None
 
     def get_source_code_lines(self, file_path: Path) -> List[str]:
@@ -91,7 +81,7 @@ class JavaCodeAnalyzer:
             with open(file_path, 'r', encoding='utf-8') as f:
                 return f.readlines()
         except Exception as e:
-            logger.warning(f"Failed to read {file_path}: {e}")
+            self.logger.warning(f"Failed to read {file_path}: {e}")
             return []
 
     def is_empty_or_comment(self, line: str) -> bool:
@@ -457,7 +447,7 @@ class JavaCodeAnalyzer:
             )
 
         except Exception as e:
-            logger.warning(f"Failed to analyze test method {method_node.name}: {e}")
+            self.logger.warning(f"Failed to analyze test method {method_node.name}: {e}")
             return None
 
 
@@ -470,6 +460,7 @@ class MavenProjectAnalyzer:
         self.test_dirs = []
         self.source_dirs = []
         self.project_packages = set()
+        self.logger = get_logger('maven_test_metrics.log', 'TestMetrics')
 
     def find_maven_modules(self) -> List[Path]:
         """查找所有Maven模块（包含pom.xml的目录）"""
@@ -505,7 +496,7 @@ class MavenProjectAnalyzer:
                 return default_test_dir
 
         except Exception as e:
-            logger.warning(f"Failed to get test directory for {module_dir}: {e}")
+            self.logger.warning(f"Failed to get test directory for {module_dir}: {e}")
 
             # 使用默认路径
             default_test_dir = module_dir / 'src' / 'test' / 'java'
@@ -537,7 +528,7 @@ class MavenProjectAnalyzer:
                 return default_source_dir
 
         except Exception as e:
-            logger.warning(f"Failed to get source directory for {module_dir}: {e}")
+            self.logger.warning(f"Failed to get source directory for {module_dir}: {e}")
 
             default_source_dir = module_dir / 'src' / 'main' / 'java'
             if default_source_dir.exists():
@@ -567,36 +558,36 @@ class MavenProjectAnalyzer:
                         packages.add(parent_package)
 
             except Exception as e:
-                logger.debug(f"Failed to extract package from {java_file}: {e}")
+                self.logger.debug(f"Failed to extract package from {java_file}: {e}")
 
         return packages
 
     def discover_project_structure(self):
         """发现项目结构"""
-        logger.info(f"Discovering structure for project: {self.project_name}")
+        self.logger.info(f"Discovering structure for project: {self.project_name}")
 
         modules = self.find_maven_modules()
-        logger.info(f"Found {len(modules)} Maven modules")
+        self.logger.info(f"Found {len(modules)} Maven modules")
 
         for module in modules:
             # 获取测试目录
             test_dir = self.get_test_source_directory(module)
             if test_dir:
                 self.test_dirs.append(test_dir)
-                logger.debug(f"Found test directory: {test_dir}")
+                self.logger.debug(f"Found test directory: {test_dir}")
 
             # 获取源码目录
             source_dir = self.get_source_directory(module)
             if source_dir:
                 self.source_dirs.append(source_dir)
-                logger.debug(f"Found source directory: {source_dir}")
+                self.logger.debug(f"Found source directory: {source_dir}")
 
                 # 提取包名
                 packages = self.extract_packages_from_source(source_dir)
                 self.project_packages.update(packages)
 
-        logger.info(f"Found {len(self.project_packages)} unique packages")
-        logger.debug(f"Project packages: {sorted(self.project_packages)[:10]}...")  # 只显示前10个
+        self.logger.info(f"Found {len(self.project_packages)} unique packages")
+        self.logger.debug(f"Project packages: {sorted(self.project_packages)[:10]}...")  # 只显示前10个
 
     def find_test_files(self) -> List[Path]:
         """查找所有测试文件"""
@@ -615,11 +606,11 @@ class MavenProjectAnalyzer:
         self.discover_project_structure()
 
         if not self.test_dirs:
-            logger.warning(f"No test directories found for project: {self.project_name}")
+            self.logger.warning(f"No test directories found for project: {self.project_name}")
             return []
 
         test_files = self.find_test_files()
-        logger.info(f"Found {len(test_files)} test files")
+        self.logger.info(f"Found {len(test_files)} test files")
 
         if not test_files:
             return []
@@ -657,13 +648,14 @@ class MavenProjectAnalyzer:
                                 all_metrics.append(metrics)
 
             except Exception as e:
-                logger.warning(f"Failed to analyze test file {test_file}: {e}")
+                self.logger.warning(f"Failed to analyze test file {test_file}: {e}")
 
-        logger.info(f"Analyzed {len(all_metrics)} test cases for project: {self.project_name}")
+        self.logger.info(f"Analyzed {len(all_metrics)} test cases for project: {self.project_name}")
         return all_metrics
 
 
 def process_single_project(project_name: str, projects_root: Path) -> List[TestMetrics]:
+    logger = get_logger('maven_test_metrics.log', 'TestMetrics')
     """处理单个项目（用于并行处理）"""
     try:
         project_path = projects_root / project_name
@@ -684,6 +676,8 @@ def process_single_project(project_name: str, projects_root: Path) -> List[TestM
 def main():
     """主函数"""
     import argparse
+
+    logger = get_logger('maven_test_metrics.log', 'TestMetrics') # 配置日志
 
     parser = argparse.ArgumentParser(description='Maven测试用例指标统计工具')
     parser.add_argument('--projects', required=True, help='项目名称列表文件（每行一个项目名，如 killme2008/aviatorscript）')

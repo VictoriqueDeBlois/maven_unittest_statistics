@@ -6,7 +6,10 @@ import run_maven_tests
 
 from unittest.mock import patch
 
+from dotenv import load_dotenv
+
 if __name__ == '__main__':
+    load_dotenv()
     # args = [
     #     '--projects', 'tests.txt',
     #     '--root', '/data/xuhaoran/github',
@@ -37,7 +40,7 @@ if __name__ == '__main__':
         '--projects', 'repos.txt',
         '--root', '/data/xuhaoran/github',
         '--output', './results',
-        '--parallel', '8'
+        '--parallel', '4'
     ]
 
     with patch('sys.argv', ['main.py'] + args):
