@@ -51,7 +51,7 @@ UNIT_TEST_KEYWORDS = {
 def is_integration_test(test_full_name: str,
                         keywords: Set[str] = INTEGRATION_TEST_KEYWORDS,
                         exclude_keywords: Set[str] = UNIT_TEST_KEYWORDS,
-                        case_sensitive: bool = False) -> bool:
+                        case_sensitive: bool = False) -> tuple[bool, str | None]:
     """
     判断是否为集成测试
 
@@ -62,12 +62,12 @@ def is_integration_test(test_full_name: str,
         case_sensitive: 是否区分大小写
 
     Returns:
-        是否为集成测试
+        (是否为集成测试, 命中的关键词)，如果未命中则关键词为 None
     """
     # 分离类名和方法名
     if '#' not in test_full_name:
         logger.warning(f"Invalid test name format: {test_full_name}")
-        return False
+        return False, None
 
     full_class_name, method_name = test_full_name.split('#', 1)
 
@@ -91,10 +91,11 @@ def is_integration_test(test_full_name: str,
         # 对于排除关键词，使用单词边界确保精确匹配
         pattern = r'\b' + re.escape(exclude_kw) + r'\b'
         if re.search(pattern, combined_name_lower, re.IGNORECASE if not case_sensitive else 0):
-            return False
+            return False, None
 
     # 检查是否包含集成测试关键词
     for keyword in keywords_lower:
+        matched = False
         # 对于短关键词（<=3字符），需要特殊处理
         if len(keyword) <= 3:
             # 如果原始关键词是全大写（如IT, E2E），在原始名称中检查
@@ -108,18 +109,26 @@ def is_integration_test(test_full_name: str,
                 # 全大写缩写，检查原始字符串（区分大小写）
                 # 例如 OrderFlowIT, UserE2ETest
                 if original_keyword in (class_name + '#' + method_name):
-                    return True
+                    matched = True
 
             # 使用单词边界匹配
-            pattern = r'\b' + re.escape(keyword) + r'\b'
-            if re.search(pattern, combined_name_lower, re.IGNORECASE if not case_sensitive else 0):
-                return True
+            if not matched:
+                pattern = r'\b' + re.escape(keyword) + r'\b'
+                if re.search(pattern, combined_name_lower, re.IGNORECASE if not case_sensitive else 0):
+                    matched = True
         else:
             # 对于长关键词，使用包含匹配
             if keyword in combined_name_lower:
-                return True
+                matched = True
 
-    return False
+        if matched:
+            # 返回命中的原始关键词（保留原始大小写）
+            for orig_kw in keywords:
+                if orig_kw.lower() == keyword:
+                    return True, orig_kw
+            return True, keyword
+
+    return False, None
 
 
 def filter_integration_tests(
@@ -178,9 +187,14 @@ def filter_integration_tests(
     integration_count = 0
     unit_count = 0
 
+    # 添加新列到 fieldnames
+    output_fieldnames = list(fieldnames) if fieldnames else []
+    if 'matched_keyword' not in output_fieldnames:
+        output_fieldnames.append('matched_keyword')
+
     for row in test_cases:
         test_name = row.get('test_full_name', '')
-        is_integration = is_integration_test(
+        is_integration, matched_kw = is_integration_test(
             test_name,
             keywords=keywords,
             exclude_keywords=exclude_kws,
@@ -194,7 +208,10 @@ def filter_integration_tests(
 
         # 根据模式决定是否保留
         if (is_integration and not inverse) or (not is_integration and inverse):
-            filtered_cases.append(row)
+            # 创建新行，添加 matched_keyword 列
+            new_row = dict(row)
+            new_row['matched_keyword'] = matched_kw if is_integration else 'N/A'
+            filtered_cases.append(new_row)
 
     logger.info(f"Integration tests: {integration_count}")
     logger.info(f"Unit/Other tests: {unit_count}")
@@ -204,7 +221,7 @@ def filter_integration_tests(
     if filtered_cases:
         try:
             with open(output_csv, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer = csv.DictWriter(f, fieldnames=output_fieldnames)
                 writer.writeheader()
                 for row in filtered_cases:
                     writer.writerow(row)
@@ -262,17 +279,14 @@ def show_statistics(
     for row in test_cases:
         test_name = row.get('test_full_name', '')
 
-        if is_integration_test(test_name, keywords=keywords, exclude_keywords=exclude_kws,
-                               case_sensitive=case_sensitive):
+        is_int, matched_kw = is_integration_test(test_name, keywords=keywords, exclude_keywords=exclude_kws,
+                               case_sensitive=case_sensitive)
+        if is_int:
             integration_tests.append(row)
 
             # 统计命中的关键词
-            combined = test_name.lower() if not case_sensitive else test_name
-            for kw in keywords:
-                kw_check = kw.lower() if not case_sensitive else kw
-                # 使用简单的包含匹配
-                if kw_check in combined:
-                    keyword_count[kw] += 1
+            if matched_kw and matched_kw in keyword_count:
+                keyword_count[matched_kw] += 1
         else:
             unit_tests.append(row)
 
