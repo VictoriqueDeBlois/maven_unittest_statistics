@@ -9,7 +9,7 @@
 import csv
 import re
 from pathlib import Path
-from typing import List, Set
+from typing import List, Set, Tuple
 import argparse
 import logging
 
@@ -21,39 +21,64 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# 集成测试常见关键词
+# 集成测试常见关键词（按优先级分组）
 INTEGRATION_TEST_KEYWORDS = {
-    # 英文关键词
-    'integration',
-    'integrated', 'integ', 'it',
+    # 高优先级：明确的集成测试标识
+    'integration', 'integrations', 'integrationtest',
+    'e2e', 'end2end', 'end-to-end', 'endtoend',
+    'systemtest', 'system',
+    'acceptancetest', 'acceptance',
+    'contracttest', 'contract',
+    'componenttest', 'component',
+    'functionaltest', 'functional',
+    'scenariotest', 'scenario',
+    'smoketest', 'smoke',
+    'sanitytest', 'sanity',
 
-    'e2e', 'end2end', 'endtoend',
-    'system', 'functional',
-    'acceptance', 'contract',
-    'component', 'scenario',
-    'smoke', 'sanity',
-
-    # 缩写
-    'IT',  # IntegrationTest
-    'E2E', # End-to-End
-    'ST',  # SystemTest
-    'AT',  # AcceptanceTest
-    'CT',  # ContractTest
-    'FT',  # FunctionalTest
+    # 中优先级：常见后缀缩写（需精确匹配）
+    'IT',   # IntegrationTest
+    'E2E',  # End-to-End
+    'ST',   # SystemTest
+    'AT',   # AcceptanceTest
+    'CT',   # ContractTest
+    'FT',   # FunctionalTest
 }
 
-# 单元测试关键词（用于排除）
+# 需要排除的关键词（单元测试等）
 UNIT_TEST_KEYWORDS = {
-    'unit', 'unittest', 'ut', 'UT'
+    'unit', 'unittest', 'units',
+    'UT',
 }
+
+
+def tokenize_camel_case(name: str) -> List[str]:
+    """
+    将驼峰命名和下划线命名的字符串分词
+    例如: OrderFlowIT -> ['Order', 'Flow', 'IT']
+         integration_test -> ['integration', 'test']
+         ApiE2ETest -> ['Api', 'E2E', 'Test']
+    """
+    # 先按下划线分词
+    parts = name.replace('-', '_').split('_')
+    
+    tokens = []
+    for part in parts:
+        if not part:
+            continue
+        # 驼峰分词：在大写字母前分割，但保持连续的大写字母+数字组合
+        # 例如: E2E, IT, API 保持完整
+        camel_tokens = re.findall(r'[A-Z]+[0-9]*[A-Z]*(?=[A-Z][a-z]|$)|[A-Z]?[a-z]+', part)
+        tokens.extend(camel_tokens)
+    
+    return tokens
 
 
 def is_integration_test(test_full_name: str,
                         keywords: Set[str] = INTEGRATION_TEST_KEYWORDS,
                         exclude_keywords: Set[str] = UNIT_TEST_KEYWORDS,
-                        case_sensitive: bool = False) -> tuple[bool, str | None]:
+                        case_sensitive: bool = False) -> Tuple[bool, str | None]:
     """
-    判断是否为集成测试
+    判断是否为集成测试（改进版：使用分词匹配）
 
     Args:
         test_full_name: 测试用例全名，格式: com.example.MyTest#testMethod
@@ -74,59 +99,98 @@ def is_integration_test(test_full_name: str,
     # 获取简单类名（不含包名）
     class_name = full_class_name.split('.')[-1]
 
-    # 组合类名和方法名用于匹配
-    combined_name = f"{class_name}#{method_name}"
+    # 对类名和方法名进行分词
+    class_tokens = tokenize_camel_case(class_name)
+    method_tokens = tokenize_camel_case(method_name)
+    all_tokens = class_tokens + method_tokens
 
+    # 构建小写版本的tokens用于不区分大小写的匹配
+    all_tokens_lower = [t.lower() for t in all_tokens]
+    class_tokens_lower = [t.lower() for t in class_tokens]
+    class_name_lower = class_name.lower()
+    method_name_lower = method_name.lower()
+
+    # 构建关键词查找字典（小写->原始）
+    keyword_map = {kw.lower(): kw for kw in keywords}
+    exclude_keyword_map = {kw.lower(): kw for kw in exclude_keywords}
+
+    # 1. 首先检查是否包含排除关键词
     if not case_sensitive:
-        combined_name_lower = combined_name.lower()
-        keywords_lower = {k.lower() for k in keywords}
-        exclude_lower = {k.lower() for k in exclude_keywords}
+        check_tokens = all_tokens_lower
     else:
-        combined_name_lower = combined_name
-        keywords_lower = keywords
-        exclude_lower = exclude_keywords
+        check_tokens = all_tokens
 
-    # 首先检查是否包含排除关键词
-    for exclude_kw in exclude_lower:
-        # 对于排除关键词，使用单词边界确保精确匹配
-        pattern = r'\b' + re.escape(exclude_kw) + r'\b'
-        if re.search(pattern, combined_name_lower, re.IGNORECASE if not case_sensitive else 0):
+    for token in check_tokens:
+        token_lower = token.lower()
+        # 精确匹配排除关键词
+        if token_lower in exclude_keyword_map:
             return False, None
+        # 也检查整个类名（对于一些特殊情况）
+        if not case_sensitive and class_name.lower() == token_lower:
+            if token_lower in exclude_keyword_map:
+                return False, None
 
-    # 检查是否包含集成测试关键词
-    for keyword in keywords_lower:
-        matched = False
-        # 对于短关键词（<=3字符），需要特殊处理
-        if len(keyword) <= 3:
-            # 如果原始关键词是全大写（如IT, E2E），在原始名称中检查
-            original_keyword = None
-            for orig_kw in keywords:
-                if orig_kw.lower() == keyword:
-                    original_keyword = orig_kw
-                    break
+    # 2. 检查是否包含集成测试关键词
+    matched_keyword = None
 
-            if original_keyword and original_keyword.isupper():
-                # 全大写缩写，检查原始字符串（区分大小写）
-                # 例如 OrderFlowIT, UserE2ETest
-                if original_keyword in (class_name + '#' + method_name):
-                    matched = True
+    # 策略1：分词后的精确匹配（优先）
+    for token_lower in all_tokens_lower:
+        if token_lower in keyword_map:
+            matched_keyword = keyword_map[token_lower]
+            return True, matched_keyword
 
-            # 使用单词边界匹配
-            if not matched:
-                pattern = r'\b' + re.escape(keyword) + r'\b'
-                if re.search(pattern, combined_name_lower, re.IGNORECASE if not case_sensitive else 0):
-                    matched = True
-        else:
-            # 对于长关键词，使用包含匹配
-            if keyword in combined_name_lower:
-                matched = True
+    # 策略2：对于大写缩写（IT, E2E等），检查是否作为驼峰命名的独立部分
+    # 例如: OrderFlowIT, PaymentE2ETest
+    if not case_sensitive:
+        # 检查原始类名中的大写字母+数字序列
+        # 需要智能分割：E2ETest -> E2E, ITTest -> IT
+        uppercase_sequences = re.findall(r'[A-Z]+[0-9]*[A-Z]*', class_name)
+        for seq in uppercase_sequences:
+            # 尝试不同的分割方式
+            if seq in keyword_map:
+                matched_keyword = keyword_map[seq]
+                return True, matched_keyword
+            # 去除末尾的 Test/TestS 等
+            if seq.endswith('TEST'):
+                seq_without_test = seq[:-4]
+                if seq_without_test in keyword_map:
+                    matched_keyword = keyword_map[seq_without_test]
+                    return True, matched_keyword
+            elif seq.endswith('TESTS'):
+                seq_without_test = seq[:-5]
+                if seq_without_test in keyword_map:
+                    matched_keyword = keyword_map[seq_without_test]
+                    return True, matched_keyword
 
-        if matched:
-            # 返回命中的原始关键词（保留原始大小写）
-            for orig_kw in keywords:
-                if orig_kw.lower() == keyword:
-                    return True, orig_kw
-            return True, keyword
+    # 策略3：检查连字符或下划线连接的关键词
+    # 例如: end-to-end, end_to_end
+    class_name_normalized = class_name.lower().replace('-', '_')
+    for keyword_lower, orig_kw in keyword_map.items():
+        if '_' in keyword_lower or '-' in keyword_lower:
+            keyword_normalized = keyword_lower.replace('-', '_')
+            if keyword_normalized in class_name_normalized:
+                matched_keyword = orig_kw
+                return True, matched_keyword
+
+    # 策略4：检查常见测试类命名模式
+    # 例如: XXXIntegrationTest, XXXE2ETest
+    for keyword_lower, orig_kw in keyword_map.items():
+        if len(keyword_lower) >= 4:  # 只对长关键词进行前缀/后缀匹配
+            # 作为前缀: IntegrationTest, E2ETest
+            if class_name_lower.startswith(keyword_lower):
+                matched_keyword = orig_kw
+                return True, matched_keyword
+            # 作为后缀: TestIntegration, TestE2E
+            if class_name_lower.endswith(keyword_lower):
+                matched_keyword = orig_kw
+                return True, matched_keyword
+            # 包含Test的模式: XXXIntegrationTest, XXXE2ETest
+            if 'test' in class_name_lower:
+                # 移除Test后缀后再检查
+                without_test = class_name_lower.replace('test', '')
+                if keyword_lower in without_test:
+                    matched_keyword = orig_kw
+                    return True, matched_keyword
 
     return False, None
 
