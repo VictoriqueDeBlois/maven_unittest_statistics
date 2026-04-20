@@ -17,7 +17,7 @@ import subprocess
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import List, Set, Dict, Optional
+from typing import List, Set, Dict, Optional, Any
 
 import javalang
 from tqdm import tqdm
@@ -30,7 +30,7 @@ class TestMetrics:
     """测试用例指标数据类"""
     project_name: str
     test_full_name: str  # 格式: com.example.MyTest#testMethod
-    setup_length: int  # 第一个断言前的有效代码行数
+    setup_length: int  # setup_length：展开后全部测试方法的非断言有效代码行之和
     assertion_count: int  # 断言数量
     mock_verify_count: int  # Mock验证次数
     uses_mock: bool  # 是否使用Mock
@@ -709,7 +709,7 @@ class MavenProjectAnalyzer:
                                           class_index: Dict[str, Path],
                                           visited: Set[str] = None,
                                           files_dict: Dict[str, Path] = None,
-                                          fields_dict: Dict[str, str] = None) -> Dict[str, any]:
+                                          fields_dict: Dict[str, str] = None) -> Dict[str, Any]:
         """
         递归收集当前类及所有父类的方法。
 
