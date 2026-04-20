@@ -30,7 +30,7 @@ class TestMetrics:
     """测试用例指标数据类"""
     project_name: str
     test_full_name: str  # 格式: com.example.MyTest#testMethod
-    oracle_length: int  # 测试预言长度（断言前的代码行数）
+    setup_length: int  # 第一个断言前的有效代码行数
     assertion_count: int  # 断言数量
     mock_verify_count: int  # Mock验证次数
     uses_mock: bool  # 是否使用Mock
@@ -60,10 +60,15 @@ class JavaCodeAnalyzer:
     # Mockito验证方法
     MOCKITO_VERIFY_METHODS = {'verify', 'verifyNoMoreInteractions', 'verifyNoInteractions'}
 
-    def __init__(self, project_root: Path, project_packages: Set[str]):
+    def __init__(self, project_root: Path, project_packages: Set[str],
+                 source_class_set: Set[str] = None):
         self.project_root = project_root
         self.project_packages = project_packages
+        # 生产类 FQN 精确集合（只含 src/main/java 中实际存在的类）
+        # 若提供则用精确匹配，否则退回包名前缀匹配
+        self.source_class_set: Set[str] = source_class_set or set()
         self.logger = get_logger('maven_test_metrics.log', 'TestMetrics')
+        self._assertion_cache: Dict[str, bool] = {}  # 缓存：方法名 -> 是否是断言方法
 
     def parse_java_file(self, file_path: Path) -> Optional[javalang.tree.CompilationUnit]:
         """解析Java文件为AST"""
@@ -126,35 +131,120 @@ class JavaCodeAnalyzer:
 
         return count
 
-    def find_first_assertion_line(self, method_node) -> Optional[int]:
-        """查找方法中第一个断言语句的行号"""
-        min_line = None
+    def is_assertion_method(self, method_name: str, all_methods: Dict,
+                             visited: Set[str] = None) -> bool:
+        """
+        判断一个方法是否是断言方法。
+        
+        判断策略（按优先级）：
+        1. 方法名以 'assert' 开头 → True
+        2. 方法名等于 'fail' → True  
+        3. 在 JUNIT_ASSERTIONS 集合中 → True
+        4. 对于可展开的项目方法，递归检查其调用链（仅限方法名包含 assert/verify/expect/check）
+        """
+        if method_name in self._assertion_cache:
+            return self._assertion_cache[method_name]
 
-        # 使用filter递归遍历方法节点中的所有子节点
-        for path, node in method_node.filter(javalang.tree.MethodInvocation):
-            method_name = node.member
-            if method_name in self.JUNIT_ASSERTIONS:
+        if visited is None:
+            visited = set()
+        if method_name in visited:
+            return False
+        visited.add(method_name)
+
+        # 策略1: 方法名语义判断（最高优先级）
+        if method_name.startswith('assert'):
+            self._assertion_cache[method_name] = True
+            return True
+        
+        # 策略2: fail() 方法
+        if method_name == 'fail':
+            self._assertion_cache[method_name] = True
+            return True
+        
+        # 策略3: JUnit 标准断言
+        if method_name in self.JUNIT_ASSERTIONS:
+            self._assertion_cache[method_name] = True
+            return True
+
+        # 策略4: 对于项目内可展开的方法，递归检查调用链
+        # 注意：只有方法名看起来像断言的才递归，避免误判 addCard 等
+        if method_name not in all_methods:
+            # 外部方法（不在 all_methods 中），如果方法名不以 assert 开头，返回 False
+            self._assertion_cache[method_name] = False
+            return False
+        
+        # 对于项目方法，只递归检查方法名包含 assert/verify/expect 的方法
+        if not any(keyword in method_name.lower() for keyword in ['assert', 'verify', 'expect', 'check']):
+            # 方法名不像断言，不递归
+            self._assertion_cache[method_name] = False
+            return False
+        
+        # 展开调用链，递归检查
+        method_node = all_methods[method_name]
+        result = False
+        for _, node in method_node.filter(javalang.tree.MethodInvocation):
+            if self.is_assertion_method(node.member, all_methods, visited):
+                result = True
+                break
+
+        self._assertion_cache[method_name] = result
+        return result
+
+    def find_first_assertion_line(self, method_node,
+                                   all_methods: Dict) -> Optional[int]:
+        """查找方法中第一个（真实）断言的行号"""
+        min_line = None
+        for _, node in method_node.filter(javalang.tree.MethodInvocation):
+            if self.is_assertion_method(node.member, all_methods):
                 if node.position and node.position.line:
                     if min_line is None or node.position.line < min_line:
                         min_line = node.position.line
-
         return min_line
 
-    def count_assertions(self, method_node) -> int:
-        """统计断言数量"""
-        count = 0
-        for path, node in method_node.filter(javalang.tree.MethodInvocation):
-            if node.member in self.JUNIT_ASSERTIONS:
-                count += 1
-        return count
+    def count_assertions(self, expanded_nodes: List,
+                          all_methods: Dict) -> int:
+        """统计断言数量（在展开后的节点列表中）"""
+        return sum(
+            1 for _, node in expanded_nodes
+            if isinstance(node, javalang.tree.MethodInvocation)
+            and self.is_assertion_method(node.member, all_methods)
+        )
 
-    def count_mock_verifications(self, method_node) -> int:
-        """统计Mock验证次数"""
-        count = 0
-        for path, node in method_node.filter(javalang.tree.MethodInvocation):
-            if node.member in self.MOCKITO_VERIFY_METHODS:
-                count += 1
-        return count
+    def expand_method_calls(self, method_node, all_methods: Dict,
+                             expanded: Set[str] = None,
+                             depth: int = 0, max_depth: int = 5,
+                             expanded_names: Set[str] = None) -> List:
+        """
+        递归展开所有可解析的方法调用（含继承方法）。
+        无 qualifier 且在 all_methods 中可找到的调用才展开（即测试类继承链上的方法）。
+        有深度限制防止无限递归。
+
+        参数:
+            expanded_names: 可选，若传入则记录本次实际展开过的所有方法名（用于行数统计）
+        """
+        if expanded is None:
+            expanded = set()
+        if depth >= max_depth:
+            return []
+
+        all_nodes = []
+        for path, node in method_node:
+            all_nodes.append((path, node))
+            if isinstance(node, javalang.tree.MethodInvocation):
+                # 只展开无 qualifier 的调用（即继承方法或当前类方法）
+                if (not node.qualifier
+                        and node.member in all_methods
+                        and node.member not in expanded):
+                    expanded.add(node.member)
+                    if expanded_names is not None:
+                        expanded_names.add(node.member)
+                    child_nodes = self.expand_method_calls(
+                        all_methods[node.member], all_methods,
+                        expanded, depth + 1, max_depth, expanded_names
+                    )
+                    all_nodes.extend(child_nodes)
+
+        return all_nodes
 
     def check_uses_mock(self, tree: javalang.tree.CompilationUnit, class_node) -> bool:
         """检查是否使用了Mock"""
@@ -179,267 +269,246 @@ class JavaCodeAnalyzer:
 
         return False
 
-    def get_called_project_methods(self, method_node, tree: javalang.tree.CompilationUnit, class_node) -> List[str]:
-        """获取调用的项目内方法列表"""
-        called_methods = []
+    def _count_method_non_assertion_lines(self, method_node, source_lines: List[str],
+                                           all_methods: Dict) -> int:
+        """统计单个方法中非断言的有效代码行数（排除空行、注释、纯大括号行、断言行）"""
+        if not method_node.position:
+            return 0
 
-        # 构建导入映射（简化类名 -> 完整类名）
+        method_start = method_node.position.line
+        method_end = method_start
+        for _, node in method_node:
+            if hasattr(node, 'position') and node.position:
+                method_end = max(method_end, node.position.line)
+
+        # 找出方法内所有断言行
+        assertion_lines = set()
+        for _, node in method_node.filter(javalang.tree.MethodInvocation):
+            if self.is_assertion_method(node.member, all_methods) and node.position:
+                assertion_lines.add(node.position.line)
+
+        count = 0
+        for line_num in range(method_start + 1, method_end + 1):
+            if line_num <= len(source_lines) and line_num not in assertion_lines:
+                line = source_lines[line_num - 1].strip()
+                if line and not line.startswith('//') and not line.startswith('*') \
+                        and not line.startswith('/*') and line not in ['{', '}', '{ }']:
+                    count += 1
+        return count
+
+    def count_expanded_effective_lines(self, test_method_node, test_file: Path,
+                                        expanded_names: Set[str],
+                                        all_methods: Dict,
+                                        all_methods_files: Dict[str, Path]) -> int:
+        """
+        统计展开后全部测试方法的有效非断言代码行总数。
+
+        包含：
+        1. 顶层测试方法本身的非断言有效行
+        2. 所有被展开的测试继承链方法的非断言有效行
+        """
+        total = 0
+
+        # 1. 顶层测试方法
+        source_lines = self.get_source_code_lines(test_file)
+        total += self._count_method_non_assertion_lines(test_method_node, source_lines, all_methods)
+
+        # 2. 被展开的方法
+        seen_files: Dict[Path, List[str]] = {test_file: source_lines}
+        for method_name in expanded_names:
+            if method_name not in all_methods or method_name not in all_methods_files:
+                continue
+            method_node = all_methods[method_name]
+            file_path = all_methods_files[method_name]
+            if file_path not in seen_files:
+                seen_files[file_path] = self.get_source_code_lines(file_path)
+            src_lines = seen_files[file_path]
+            total += self._count_method_non_assertion_lines(method_node, src_lines, all_methods)
+
+        return total
+
+    def build_local_var_type_map(self, method_node) -> Dict[str, str]:
+        """提取方法体中所有局部变量的声明类型: 变量名 -> 简单类型名"""
+        var_type_map = {}
+        for _, node in method_node.filter(javalang.tree.LocalVariableDeclaration):
+            type_name = node.type.name
+            for declarator in node.declarators:
+                var_type_map[declarator.name] = type_name
+        return var_type_map
+
+    def build_field_type_map(self, class_node, import_map: Dict[str, str],
+                              package_name: str) -> Dict[str, str]:
+        """提取类字段类型映射: 字段名 -> FQN 或 package.TypeName"""
+        field_map = {}
+        if class_node.fields:
+            for field in class_node.fields:
+                type_name = field.type.name
+                # 优先从 import_map 解析 FQN，否则假设同包
+                fqn = import_map.get(type_name)
+                if not fqn:
+                    fqn = f"{package_name}.{type_name}" if package_name else type_name
+                for declarator in field.declarators:
+                    field_map[declarator.name] = fqn
+        return field_map
+
+    def _collect_called_project_methods(self, expanded_nodes: List,
+                                         tree, class_node,
+                                         package_name: str,
+                                         all_methods: Dict = None,
+                                         method_node=None,
+                                         inheritance_field_map: Dict[str, str] = None) -> List[str]:
+        """
+        从展开后的节点列表中收集【生产代码】的方法调用。
+
+        规则：
+        - 无 qualifier 的调用（测试类继承链上的方法）→ 全部跳过，它们是测试基础设施
+        - 有 qualifier 的调用 → 解析 qualifier 的类型，若属于生产代码包则收集
+
+        参数:
+            all_methods: 测试继承链全量方法表（用于判断 qualifier 是否是测试方法，以便跳过）
+            method_node: 测试方法 AST 节点，用于提取局部变量类型映射
+            inheritance_field_map: 继承链上所有字段的类型映射 field_name -> FQN
+        """
+        # 构建当前文件的 import_map（简单类名 -> FQN）
         import_map = {}
-        static_imports = set()  # 静态导入的方法
-
         if tree.imports:
             for imp in tree.imports:
-                if imp.static:
-                    # 静态导入，只记录项目内的类
-                    if imp.wildcard:
-                        # import static Class.*
-                        if self._is_project_class(imp.path):
-                            static_imports.add(imp.path)
-                    else:
-                        # import static Class.method
-                        parts = imp.path.split('.')
-                        class_name = '.'.join(parts[:-1])
-                        if self._is_project_class(class_name):
-                            static_imports.add(class_name)
-                else:
-                    # 普通导入
-                    parts = imp.path.split('.')
-                    if not imp.wildcard:
-                        simple_name = parts[-1]
-                        import_map[simple_name] = imp.path
+                if not imp.static and not imp.wildcard:
+                    import_map[imp.path.split('.')[-1]] = imp.path
 
-        # 获取当前包名和类名
-        package_name = tree.package.name if tree.package else ""
-        current_class_name = f"{package_name}.{class_node.name}" if package_name else class_node.name
+        # 局部变量类型映射（仅当前测试方法体内）
+        local_var_type_map = self.build_local_var_type_map(method_node) if method_node else {}
 
-        for path, node in method_node.filter(javalang.tree.MethodInvocation):
-            qualifier = node.qualifier
-            member = node.member
+        # 字段类型映射：优先使用继承链全量字段，退回到当前类字段
+        if inheritance_field_map is not None:
+            field_type_map = inheritance_field_map
+        else:
+            field_type_map = self.build_field_type_map(class_node, import_map, package_name)
 
-            full_method = None
+        called_methods = []
 
-            if qualifier:
-                # 有限定符，如 obj.method() 或 ClassName.method()
-                if qualifier in import_map:
-                    # 是导入的类的静态方法调用
-                    full_class = import_map[qualifier]
-                    if self._is_project_class(full_class):
-                        full_method = f"{full_class}.{member}"
-                elif qualifier == class_node.name:
-                    # 当前类的方法
-                    if self._is_project_class(current_class_name):
-                        full_method = f"{current_class_name}.{member}"
-                else:
-                    # 可能是对象调用或其他情况
-                    # 尝试在同包下查找类
-                    possible_class = f"{package_name}.{qualifier}" if package_name else qualifier
-                    if self._is_project_class(possible_class):
-                        full_method = f"{possible_class}.{member}"
-            else:
-                # 无限定符，可能是：
-                # 1. 当前类的方法
-                # 2. 静态导入的方法
-                # 3. 同包下其他类的静态方法
+        for _, node in expanded_nodes:
+            if not isinstance(node, javalang.tree.MethodInvocation):
+                continue
+            qualifier, member = node.qualifier, node.member
 
-                # 排除测试框架的方法（断言、Mock等）
-                if member in self.JUNIT_ASSERTIONS or member in self.MOCKITO_VERIFY_METHODS or member in self.MOCKITO_MOCK_METHODS:
-                    continue
+            # 跳过 JUnit 断言、Mockito 验证和 Mock 方法（这些是测试框架方法）
+            if member in self.JUNIT_ASSERTIONS or member in self.MOCKITO_VERIFY_METHODS \
+                    or member in self.MOCKITO_MOCK_METHODS:
+                continue
 
-                # 检查是否是静态导入的方法
-                for static_class in static_imports:
-                    if self._is_project_class(static_class):
-                        full_method = f"{static_class}.{member}"
-                        break
+            # 无 qualifier：这些全是测试类继承链上的方法（addCard/execute 等），不是被测代码，跳过
+            if not qualifier:
+                continue
 
-                # 如果不是静态导入，可能是当前类或父类的方法
-                if not full_method and self._is_project_class(current_class_name):
-                    # 检查是否是当前类的方法
-                    is_current_class_method = False
-                    if class_node.methods:
-                        for m in class_node.methods:
-                            if m.name == member:
-                                is_current_class_method = True
-                                break
+            # 有 qualifier：解析 qualifier 对应的完整类名
+            full_class = None
 
-                    if is_current_class_method:
-                        full_method = f"{current_class_name}.{member}"
+            if qualifier in import_map:
+                # qualifier 是类名，且在 import 中找到
+                full_class = import_map[qualifier]
+            elif qualifier == class_node.name:
+                # 当前类的静态方法
+                full_class = f"{package_name}.{class_node.name}" if package_name else class_node.name
+            elif qualifier in local_var_type_map:
+                # qualifier 是局部变量
+                type_name = local_var_type_map[qualifier]
+                full_class = import_map.get(type_name)
+                if not full_class:
+                    full_class = f"{package_name}.{type_name}" if package_name else type_name
+            elif qualifier in field_type_map:
+                # qualifier 是字段（包括继承链上父类的字段）
+                full_class = field_type_map[qualifier]
+            # else: 无法解析（链式调用中间结果等），跳过
 
-            if full_method and full_method not in called_methods:
-                called_methods.append(full_method)
+            if full_class and self._is_production_class(full_class):
+                full_method = f"{full_class}.{member}"
+                if full_method not in called_methods:
+                    called_methods.append(full_method)
 
         return called_methods
 
     def _is_project_class(self, full_class_name: str) -> bool:
-        """判断是否为项目内的类"""
+        """判断是否为项目内的类（包名前缀匹配，用于旧逻辑兼容）"""
         for package in self.project_packages:
             if full_class_name.startswith(package):
                 return True
         return False
 
-    def get_private_methods(self, class_node) -> Dict[str, any]:
-        """获取类中的所有private方法"""
-        private_methods = {}
-
-        if class_node.methods:
-            for method in class_node.methods:
-                if method.modifiers and 'private' in method.modifiers:
-                    private_methods[method.name] = method
-
-        return private_methods
-
-    def expand_private_method_calls(self, method_node, private_methods: Dict,
-                                    expanded: Set[str] = None) -> List:
+    def _is_production_class(self, full_class_name: str) -> bool:
         """
-        递归展开private方法调用
-        返回展开后的所有节点
+        判断是否为【生产代码】的类。
+        若已建立 source_class_set，使用精确 FQN 匹配（最准确）；
+        否则退回包名前缀匹配。
         """
-        if expanded is None:
-            expanded = set()
+        if self.source_class_set:
+            return full_class_name in self.source_class_set
+        return self._is_project_class(full_class_name)
 
-        all_nodes = []
+    def analyze_test_method(self, test_file: Path, class_node,
+                             method_node, tree, project_name: str,
+                             all_methods: Dict,
+                             all_methods_files: Dict[str, Path] = None,
+                             inheritance_field_map: Dict[str, str] = None
+                             ) -> Optional[TestMetrics]:
+        """
+        分析单个测试方法。
 
-        # 收集当前方法的所有节点
-        for path, node in method_node:
-            all_nodes.append((path, node))
-
-            if isinstance(node, javalang.tree.MethodInvocation):
-                method_name = node.member
-
-                # 如果调用的是private方法且未展开过
-                if method_name in private_methods and method_name not in expanded:
-                    expanded.add(method_name)
-                    private_method = private_methods[method_name]
-
-                    # 递归展开
-                    expanded_nodes = self.expand_private_method_calls(
-                        private_method, private_methods, expanded
-                    )
-                    all_nodes.extend(expanded_nodes)
-
-        return all_nodes
-
-    def analyze_test_method(self, test_file: Path, class_node, method_node,
-                            tree: javalang.tree.CompilationUnit, project_name: str) -> Optional[TestMetrics]:
-        """分析单个测试方法"""
+        参数:
+            all_methods: 含继承链的全量测试方法表
+            all_methods_files: 每个方法对应的源文件路径（用于展开后行数统计）
+            inheritance_field_map: 继承链全量字段类型映射（用于解析 qualifier 类型）
+        """
         try:
-            # 获取完整类名
+            # 每次分析新方法前清空断言缓存
+            self._assertion_cache.clear()
+
             package_name = tree.package.name if tree.package else ""
-            class_name = class_node.name
-            full_class_name = f"{package_name}.{class_name}" if package_name else class_name
+            full_class_name = f"{package_name}.{class_node.name}" if package_name else class_node.name
             test_full_name = f"{full_class_name}#{method_node.name}"
 
-            # 获取private方法
-            private_methods = self.get_private_methods(class_node)
+            # 展开调用链（仅展开测试继承链上的方法），同时追踪展开的方法名
+            expanded_names: Set[str] = set()
+            expanded_nodes = self.expand_method_calls(
+                method_node, all_methods, expanded_names=expanded_names
+            )
 
-            # 展开private方法调用（获取所有节点，包括展开的private方法）
-            expanded_nodes = self.expand_private_method_calls(method_node, private_methods)
-
-            # 查找第一个断言的行号（在原始方法中，不在展开的private方法中）
-            first_assertion_line = self.find_first_assertion_line(method_node)
-
-            # 计算测试预言长度
-            oracle_length = 0
-            if first_assertion_line and method_node.position:
+            # setup_length：展开后全部测试方法的非断言有效代码行之和
+            if all_methods_files is not None:
+                setup_length = self.count_expanded_effective_lines(
+                    method_node, test_file, expanded_names, all_methods, all_methods_files
+                )
+            else:
+                # 退回到只统计顶层方法（兼容旧调用方式）
                 source_lines = self.get_source_code_lines(test_file)
-                start_line = method_node.position.line + 1  # 跳过方法签名
-                oracle_length = self.count_effective_lines(source_lines, start_line, first_assertion_line - 1)
+                setup_length = self._count_method_non_assertion_lines(
+                    method_node, source_lines, all_methods
+                )
 
-            # 统计断言数量（包括展开的private方法）
-            assertion_count = sum(1 for _, node in expanded_nodes
-                                  if isinstance(node, javalang.tree.MethodInvocation)
-                                  and node.member in self.JUNIT_ASSERTIONS)
+            # 断言数量（在展开后的节点里统计）
+            assertion_count = self.count_assertions(expanded_nodes, all_methods)
 
-            # 统计Mock验证次数（包括展开的private方法）
-            mock_verify_count = sum(1 for _, node in expanded_nodes
-                                    if isinstance(node, javalang.tree.MethodInvocation)
-                                    and node.member in self.MOCKITO_VERIFY_METHODS)
+            # Mock 验证次数
+            mock_verify_count = sum(
+                1 for _, node in expanded_nodes
+                if isinstance(node, javalang.tree.MethodInvocation)
+                and node.member in self.MOCKITO_VERIFY_METHODS
+            )
 
-            # 检查是否使用Mock
+            # 是否使用 Mock
             uses_mock = self.check_uses_mock(tree, class_node)
 
-            # 获取调用的项目内方法（包括展开的private方法）
-            called_methods = []
-
-            # 构建导入映射
-            import_map = {}
-            static_imports = set()
-
-            if tree.imports:
-                for imp in tree.imports:
-                    if imp.static:
-                        # 静态导入
-                        if imp.wildcard:
-                            # import static Class.* 的情况
-                            # 只记录项目内的类
-                            if self._is_project_class(imp.path):
-                                static_imports.add(imp.path)
-                        else:
-                            # import static Class.method 的情况
-                            parts = imp.path.split('.')
-                            class_name_import = '.'.join(parts[:-1])
-                            if self._is_project_class(class_name_import):
-                                static_imports.add(class_name_import)
-                    else:
-                        # 普通导入
-                        parts = imp.path.split('.')
-                        if not imp.wildcard:
-                            simple_name = parts[-1]
-                            import_map[simple_name] = imp.path
-
-            current_class_full = f"{package_name}.{class_node.name}" if package_name else class_node.name
-
-            for _, node in expanded_nodes:
-                if isinstance(node, javalang.tree.MethodInvocation):
-                    qualifier = node.qualifier
-                    member = node.member
-
-                    full_method = None
-
-                    if qualifier:
-                        # 有限定符的调用
-                        if qualifier in import_map:
-                            full_class = import_map[qualifier]
-                            if self._is_project_class(full_class):
-                                full_method = f"{full_class}.{member}"
-                        elif qualifier == class_node.name:
-                            if self._is_project_class(current_class_full):
-                                full_method = f"{current_class_full}.{member}"
-                        else:
-                            # 尝试同包下的类
-                            possible_class = f"{package_name}.{qualifier}" if package_name else qualifier
-                            if self._is_project_class(possible_class):
-                                full_method = f"{possible_class}.{member}"
-                    else:
-                        # 无限定符的调用
-                        # 排除断言和Mock方法（这些是测试框架的方法，不是项目方法）
-                        if member in self.JUNIT_ASSERTIONS or member in self.MOCKITO_VERIFY_METHODS or member in self.MOCKITO_MOCK_METHODS:
-                            continue
-
-                        # 检查静态导入
-                        for static_class in static_imports:
-                            if self._is_project_class(static_class):
-                                full_method = f"{static_class}.{member}"
-                                break
-
-                        # 检查当前类的方法
-                        if not full_method and self._is_project_class(current_class_full):
-                            is_current_class_method = False
-                            if class_node.methods:
-                                for m in class_node.methods:
-                                    if m.name == member:
-                                        is_current_class_method = True
-                                        break
-
-                            if is_current_class_method:
-                                full_method = f"{current_class_full}.{member}"
-
-                    if full_method and full_method not in called_methods:
-                        called_methods.append(full_method)
+            # 只收集【生产代码】的方法调用
+            called_methods = self._collect_called_project_methods(
+                expanded_nodes, tree, class_node, package_name, all_methods,
+                method_node=method_node,
+                inheritance_field_map=inheritance_field_map
+            )
 
             return TestMetrics(
                 project_name=project_name,
                 test_full_name=test_full_name,
-                oracle_length=oracle_length,
+                setup_length=setup_length,
                 assertion_count=assertion_count,
                 mock_verify_count=mock_verify_count,
                 uses_mock=uses_mock,
@@ -447,7 +516,7 @@ class JavaCodeAnalyzer:
             )
 
         except Exception as e:
-            self.logger.warning(f"Failed to analyze test method {method_node.name}: {e}")
+            self.logger.warning(f"Failed to analyze {method_node.name}: {e}")
             return None
 
 
@@ -459,7 +528,8 @@ class MavenProjectAnalyzer:
         self.project_name = project_name
         self.test_dirs = []
         self.source_dirs = []
-        self.project_packages = set()
+        self.project_packages = set()   # 仅 src/main/java 的包（生产代码包）
+        self.test_packages = set()      # 仅 src/test/java 的包（测试代码包）
         self.logger = get_logger('maven_test_metrics.log', 'TestMetrics')
 
     def find_maven_modules(self) -> List[Path]:
@@ -551,9 +621,9 @@ class MavenProjectAnalyzer:
                     package = match.group(1)
                     packages.add(package)
 
-                    # 添加所有父包
+                    # 添加所有父包（要求至少2个组件，避免 org/com/mage 这类单词误匹配）
                     parts = package.split('.')
-                    for i in range(1, len(parts)):
+                    for i in range(2, len(parts)):
                         parent_package = '.'.join(parts[:i])
                         packages.add(parent_package)
 
@@ -575,6 +645,9 @@ class MavenProjectAnalyzer:
             if test_dir:
                 self.test_dirs.append(test_dir)
                 self.logger.debug(f"Found test directory: {test_dir}")
+                # 提取测试包名（测试代码的包）
+                test_packages = self.extract_packages_from_source(test_dir)
+                self.test_packages.update(test_packages)
 
             # 获取源码目录
             source_dir = self.get_source_directory(module)
@@ -582,12 +655,13 @@ class MavenProjectAnalyzer:
                 self.source_dirs.append(source_dir)
                 self.logger.debug(f"Found source directory: {source_dir}")
 
-                # 提取包名
+                # 提取生产代码包名
                 packages = self.extract_packages_from_source(source_dir)
                 self.project_packages.update(packages)
 
-        self.logger.info(f"Found {len(self.project_packages)} unique packages")
-        self.logger.debug(f"Project packages: {sorted(self.project_packages)[:10]}...")  # 只显示前10个
+        self.logger.info(f"Found {len(self.project_packages)} production packages, "
+                         f"{len(self.test_packages)} test packages")
+        self.logger.debug(f"Project packages: {sorted(self.project_packages)[:10]}...")
 
     def find_test_files(self) -> List[Path]:
         """查找所有测试文件"""
@@ -601,6 +675,139 @@ class MavenProjectAnalyzer:
 
         return test_files
 
+    def build_class_index(self) -> Dict[str, Path]:
+        """构建类型名索引：全类名 -> Path（含 class / interface / enum）"""
+        class_index = {}
+        analyzer = JavaCodeAnalyzer(self.project_root, self.project_packages)
+
+        for source_dir in self.test_dirs + self.source_dirs:
+            for java_file in source_dir.rglob('*.java'):
+                tree = analyzer.parse_java_file(java_file)
+                if not tree:
+                    continue
+
+                package_name = tree.package.name if tree.package else ""
+                # 同时索引 class、interface、enum
+                type_nodes = (
+                    list(tree.filter(javalang.tree.ClassDeclaration))
+                    + list(tree.filter(javalang.tree.InterfaceDeclaration))
+                    + list(tree.filter(javalang.tree.EnumDeclaration))
+                )
+                for _, type_node in type_nodes:
+                    full_name = f"{package_name}.{type_node.name}" if package_name else type_node.name
+                    if full_name in class_index and class_index[full_name] != java_file:
+                        self.logger.warning(
+                            f"Duplicate FQN detected: {full_name}\n"
+                            f"  existing: {class_index[full_name]}\n"
+                            f"  new:      {java_file}"
+                        )
+                    class_index[full_name] = java_file
+
+        return class_index
+
+    def get_all_methods_with_inheritance(self, class_node, tree,
+                                          class_index: Dict[str, Path],
+                                          visited: Set[str] = None,
+                                          files_dict: Dict[str, Path] = None,
+                                          fields_dict: Dict[str, str] = None) -> Dict[str, any]:
+        """
+        递归收集当前类及所有父类的方法。
+
+        参数:
+            files_dict: 可选，若传入则同步填充 method_name -> 文件路径
+            fields_dict: 可选，若传入则同步填充整个继承链的字段 field_name -> FQN类型
+        """
+        if visited is None:
+            visited = set()
+
+        all_methods = {}
+
+        # 解析父类
+        if class_node.extends:
+            parent_class_name = class_node.extends.name
+
+            # 通过 import 解析全类名
+            full_parent_name = None
+            if tree.imports:
+                for imp in tree.imports:
+                    if not imp.static and not imp.wildcard:
+                        if imp.path.split('.')[-1] == parent_class_name:
+                            full_parent_name = imp.path
+                            break
+
+            # 如果没找到，假设在同包下
+            if not full_parent_name:
+                package_name = tree.package.name if tree.package else ""
+                full_parent_name = f"{package_name}.{parent_class_name}" if package_name else parent_class_name
+
+            # 查找父类文件并递归
+            if full_parent_name in class_index and full_parent_name not in visited:
+                visited.add(full_parent_name)
+                parent_file = class_index[full_parent_name]
+                analyzer = JavaCodeAnalyzer(self.project_root, self.project_packages)
+                parent_tree = analyzer.parse_java_file(parent_file)
+
+                if parent_tree:
+                    for _, parent_class_node in parent_tree.filter(javalang.tree.ClassDeclaration):
+                        # 先递归收集父类的方法
+                        parent_methods = self.get_all_methods_with_inheritance(
+                            parent_class_node, parent_tree, class_index, visited,
+                            files_dict, fields_dict
+                        )
+                        all_methods.update(parent_methods)
+
+                        # 收集父类直接定义的方法
+                        if parent_class_node.methods:
+                            for method in parent_class_node.methods:
+                                if method.name not in all_methods:  # 子类优先
+                                    all_methods[method.name] = method
+                                    if files_dict is not None:
+                                        files_dict[method.name] = parent_file
+
+                        # 收集父类字段（子类字段优先，此处用 setdefault 不覆盖）
+                        if fields_dict is not None and parent_class_node.fields:
+                            parent_import_map = {}
+                            if parent_tree.imports:
+                                for imp in parent_tree.imports:
+                                    if not imp.static and not imp.wildcard:
+                                        parent_import_map[imp.path.split('.')[-1]] = imp.path
+                            parent_pkg = parent_tree.package.name if parent_tree.package else ""
+                            for field in parent_class_node.fields:
+                                type_name = field.type.name
+                                fqn = parent_import_map.get(type_name)
+                                if not fqn:
+                                    fqn = f"{parent_pkg}.{type_name}" if parent_pkg else type_name
+                                for declarator in field.declarators:
+                                    fields_dict.setdefault(declarator.name, fqn)
+
+        # 收集当前类的方法（覆盖父类同名方法）
+        if class_node.methods:
+            current_file = class_index.get(
+                f"{(tree.package.name + '.') if tree.package else ''}{class_node.name}", None
+            )
+            for method in class_node.methods:
+                all_methods[method.name] = method  # 子类方法优先
+                if files_dict is not None and current_file:
+                    files_dict[method.name] = current_file
+
+        # 收集当前类字段（最高优先级，覆盖父类同名字段）
+        if fields_dict is not None and class_node.fields:
+            import_map = {}
+            if tree.imports:
+                for imp in tree.imports:
+                    if not imp.static and not imp.wildcard:
+                        import_map[imp.path.split('.')[-1]] = imp.path
+            package_name = tree.package.name if tree.package else ""
+            for field in class_node.fields:
+                type_name = field.type.name
+                fqn = import_map.get(type_name)
+                if not fqn:
+                    fqn = f"{package_name}.{type_name}" if package_name else type_name
+                for declarator in field.declarators:
+                    fields_dict[declarator.name] = fqn  # 当前类优先
+
+        return all_methods
+
     def analyze_tests(self) -> List[TestMetrics]:
         """分析所有测试用例"""
         self.discover_project_structure()
@@ -610,12 +817,20 @@ class MavenProjectAnalyzer:
             return []
 
         test_files = self.find_test_files()
-        self.logger.info(f"Found {len(test_files)} test files")
+        class_index = self.build_class_index()  # 构建类索引
+        self.logger.info(f"Found {len(test_files)} test files, {len(class_index)} classes indexed")
 
         if not test_files:
             return []
 
-        analyzer = JavaCodeAnalyzer(self.project_root, self.project_packages)
+        # 仅 src/main/java 中实际存在的类（精确 FQN 集合），用于区分生产代码与测试代码
+        source_class_set: Set[str] = {
+            fqn for fqn, path in class_index.items()
+            if any(str(path).startswith(str(sd)) for sd in self.source_dirs)
+        }
+        self.logger.info(f"Source class set: {len(source_class_set)} classes from main/java")
+
+        analyzer = JavaCodeAnalyzer(self.project_root, self.project_packages, source_class_set)
         all_metrics = []
 
         # 使用tqdm显示进度
@@ -630,6 +845,15 @@ class MavenProjectAnalyzer:
                     if not class_node.methods:
                         continue
 
+                    # 构建继承链全量方法表（同时填充 files_dict 和 fields_dict）
+                    all_methods_files: Dict[str, Path] = {}
+                    inheritance_field_map: Dict[str, str] = {}
+                    all_methods = self.get_all_methods_with_inheritance(
+                        class_node, tree, class_index,
+                        files_dict=all_methods_files,
+                        fields_dict=inheritance_field_map
+                    )
+
                     # 遍历所有方法
                     for method in class_node.methods:
                         # 检查是否为测试方法（带@Test注解）
@@ -642,7 +866,10 @@ class MavenProjectAnalyzer:
 
                         if is_test:
                             metrics = analyzer.analyze_test_method(
-                                test_file, class_node, method, tree, self.project_name
+                                test_file, class_node, method, tree, self.project_name,
+                                all_methods,
+                                all_methods_files=all_methods_files,
+                                inheritance_field_map=inheritance_field_map
                             )
                             if metrics:
                                 all_metrics.append(metrics)
@@ -738,7 +965,7 @@ def main():
     # 打开CSV文件用于增量写入
     csv_file = open(output_file, 'a' if args.append else 'w', newline='', encoding='utf-8')
     csv_writer = csv.DictWriter(csv_file, fieldnames=[
-        'project_name', 'test_full_name', 'oracle_length',
+        'project_name', 'test_full_name', 'setup_length',
         'assertion_count', 'mock_verify_count', 'uses_mock',
         'called_project_methods'
     ])
