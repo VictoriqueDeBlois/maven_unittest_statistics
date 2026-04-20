@@ -676,7 +676,10 @@ class MavenProjectAnalyzer:
         return test_files
 
     def build_class_index(self) -> Dict[str, Path]:
-        """构建类型名索引：全类名 -> Path（含 class / interface / enum）"""
+        """
+        构建类型名索引：全类名 -> Path（仅顶层 class / interface / enum）。
+        内部类/内部枚举跳过——它们的简单名可能与其他文件的同名内部类冲突。
+        """
         class_index = {}
         analyzer = JavaCodeAnalyzer(self.project_root, self.project_packages)
 
@@ -687,13 +690,17 @@ class MavenProjectAnalyzer:
                     continue
 
                 package_name = tree.package.name if tree.package else ""
-                # 同时索引 class、interface、enum
+                # tree.types 是编译单元的顶层类型声明列表，用 id 做精确过滤
+                top_level_ids = {id(t) for t in (tree.types or [])}
+
                 type_nodes = (
                     list(tree.filter(javalang.tree.ClassDeclaration))
                     + list(tree.filter(javalang.tree.InterfaceDeclaration))
                     + list(tree.filter(javalang.tree.EnumDeclaration))
                 )
                 for _, type_node in type_nodes:
+                    if id(type_node) not in top_level_ids:
+                        continue  # 跳过内部类/内部枚举
                     full_name = f"{package_name}.{type_node.name}" if package_name else type_node.name
                     if full_name in class_index and class_index[full_name] != java_file:
                         self.logger.warning(
