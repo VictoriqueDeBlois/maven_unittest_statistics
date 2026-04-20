@@ -166,18 +166,26 @@ def extract_test_case_code(
     if not method_code:
         return False
 
-    # 生成输出文件名
-    # 格式: projectname__classname__methodname.java
-    safe_project_name = sanitize_filename(project_name.replace('/', '_'))
+    # 生成多级目录结构: output_dir/owner/repo/classname/methodname.java
+    # project_name 格式: owner/repo (如 killme2008/aviatorscript)
+    project_parts = project_name.split('/')
+    if len(project_parts) == 2:
+        owner, repo = project_parts
+    else:
+        # 如果不是标准的 owner/repo 格式，整体作为 repo
+        owner = 'unknown'
+        repo = sanitize_filename(project_name.replace('/', '_'))
+    
     safe_class_name = sanitize_filename(class_name)
     safe_method_name = sanitize_filename(method_name)
-
-    output_filename = f"{safe_project_name}__{safe_class_name}__{safe_method_name}.java"
-    output_file = output_dir / output_filename
+    
+    # 构建多级目录路径
+    output_dir_structure = output_dir / owner / repo / safe_class_name
+    output_file = output_dir_structure / f"{safe_method_name}.java"
 
     # 保存代码片段
     try:
-        output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir_structure.mkdir(parents=True, exist_ok=True)
 
         # 添加文件头注释
         header = f"""// Project: {project_name}
@@ -194,7 +202,7 @@ def extract_test_case_code(
             f.write(header)
             f.write(method_code)
 
-        logger.info(f"Extracted: {output_filename}")
+        logger.info(f"Extracted: {output_file.relative_to(output_dir)}")
         return True
 
     except Exception as e:
