@@ -336,6 +336,24 @@ class JavaCodeAnalyzer:
                 var_type_map[declarator.name] = type_name
         return var_type_map
 
+    def build_combined_import_map(self, all_methods_files: Dict[str, Path]) -> Dict[str, str]:
+        """构建继承链所有文件的合并 import_map（简单类名 -> FQN）。
+        用于解析在父类文件中导入但子类文件中未导入的类型。
+        """
+        combined: Dict[str, str] = {}
+        seen_files: Set[Path] = set()
+        for file_path in all_methods_files.values():
+            if file_path in seen_files:
+                continue
+            seen_files.add(file_path)
+            tree = self.parse_java_file(file_path)
+            if tree and tree.imports:
+                for imp in tree.imports:
+                    if not imp.static and not imp.wildcard:
+                        simple_name = imp.path.split('.')[-1]
+                        combined.setdefault(simple_name, imp.path)
+        return combined
+
     def build_field_type_map(self, class_node, import_map: Dict[str, str],
                               package_name: str) -> Dict[str, str]:
         """提取类字段类型映射: 字段名 -> FQN 或 package.TypeName"""
@@ -356,7 +374,8 @@ class JavaCodeAnalyzer:
                                          package_name: str,
                                          all_methods: Dict = None,
                                          method_node=None,
-                                         inheritance_field_map: Dict[str, str] = None) -> List[str]:
+                                         inheritance_field_map: Dict[str, str] = None,
+                                         all_methods_files: Dict[str, Path] = None) -> List[str]:
         """
         从展开后的节点列表中收集【生产代码】的方法调用。
 
@@ -368,6 +387,7 @@ class JavaCodeAnalyzer:
             all_methods: 测试继承链全量方法表（用于判断 qualifier 是否是测试方法，以便跳过）
             method_node: 测试方法 AST 节点，用于提取局部变量类型映射
             inheritance_field_map: 继承链上所有字段的类型映射 field_name -> FQN
+            all_methods_files: 继承链方法文件路径表，用于构建合并 import_map
         """
         # 构建当前文件的 import_map（简单类名 -> FQN）
         import_map = {}
@@ -375,6 +395,10 @@ class JavaCodeAnalyzer:
             for imp in tree.imports:
                 if not imp.static and not imp.wildcard:
                     import_map[imp.path.split('.')[-1]] = imp.path
+
+        # 合并继承链所有文件的 import_map（解析父类中导入但子类未导入的类型）
+        combined_import_map = self.build_combined_import_map(all_methods_files) \
+            if all_methods_files else import_map
 
         # 局部变量类型映射（仅当前测试方法体内）
         local_var_type_map = self.build_local_var_type_map(method_node) if method_node else {}
@@ -405,21 +429,32 @@ class JavaCodeAnalyzer:
             full_class = None
 
             if qualifier in import_map:
-                # qualifier 是类名，且在 import 中找到
+                # qualifier 是类名，且在当前文件 import 中找到
                 full_class = import_map[qualifier]
+            elif qualifier in combined_import_map:
+                # qualifier 在继承链某个父类文件中导入
+                full_class = combined_import_map[qualifier]
             elif qualifier == class_node.name:
                 # 当前类的静态方法
                 full_class = f"{package_name}.{class_node.name}" if package_name else class_node.name
             elif qualifier in local_var_type_map:
                 # qualifier 是局部变量
                 type_name = local_var_type_map[qualifier]
-                full_class = import_map.get(type_name)
+                full_class = combined_import_map.get(type_name) or import_map.get(type_name)
                 if not full_class:
                     full_class = f"{package_name}.{type_name}" if package_name else type_name
             elif qualifier in field_type_map:
                 # qualifier 是字段（包括继承链上父类的字段）
                 full_class = field_type_map[qualifier]
-            # else: 无法解析（链式调用中间结果等），跳过
+            elif '.' in qualifier:
+                # 链式访问（如 CardRepository.instance.findCard），尝试解析根部分
+                root = qualifier.split('.')[0]
+                root_class = (combined_import_map.get(root) or import_map.get(root)
+                               or field_type_map.get(root) or local_var_type_map.get(root))
+                if root_class:
+                    # 方法归属于根类型（近似：实际返回类型可能不同）
+                    full_class = root_class
+            # else: 无法解析，跳过
 
             if full_class and self._is_production_class(full_class):
                 full_method = f"{full_class}.{member}"
@@ -502,7 +537,8 @@ class JavaCodeAnalyzer:
             called_methods = self._collect_called_project_methods(
                 expanded_nodes, tree, class_node, package_name, all_methods,
                 method_node=method_node,
-                inheritance_field_map=inheritance_field_map
+                inheritance_field_map=inheritance_field_map,
+                all_methods_files=all_methods_files
             )
 
             return TestMetrics(
