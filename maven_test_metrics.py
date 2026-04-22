@@ -400,8 +400,14 @@ class JavaCodeAnalyzer:
         combined_import_map = self.build_combined_import_map(all_methods_files) \
             if all_methods_files else import_map
 
-        # 局部变量类型映射（仅当前测试方法体内）
-        local_var_type_map = self.build_local_var_type_map(method_node) if method_node else {}
+        # 局部变量 & 方法形参类型映射：从展开后全部节点收集
+        local_var_type_map: Dict[str, str] = {}
+        for _, node in expanded_nodes:
+            if isinstance(node, javalang.tree.LocalVariableDeclaration):
+                for declarator in node.declarators:
+                    local_var_type_map[declarator.name] = node.type.name
+            elif isinstance(node, javalang.tree.FormalParameter):
+                local_var_type_map[node.name] = node.type.name
 
         # 字段类型映射：优先使用继承链全量字段，退回到当前类字段
         if inheritance_field_map is not None:

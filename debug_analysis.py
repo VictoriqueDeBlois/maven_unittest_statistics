@@ -50,6 +50,15 @@ def _get_prod_calls(method_node, import_map: dict,
             | analyzer.MOCKITO_VERIFY_METHODS
             | analyzer.MOCKITO_MOCK_METHODS)
     combined = combined_import_map or import_map
+
+    # 收集方法体内局部变量类型 & 形参类型
+    local_var: Dict[str, str] = {}
+    for _, node in method_node.filter(javalang.tree.LocalVariableDeclaration):
+        for declarator in node.declarators:
+            local_var[declarator.name] = node.type.name
+    for _, node in method_node.filter(javalang.tree.FormalParameter):
+        local_var[node.name] = node.type.name
+
     counts: Dict[str, int] = {}
     for _, node in method_node:
         if not isinstance(node, javalang.tree.MethodInvocation) or not node.qualifier:
@@ -58,11 +67,13 @@ def _get_prod_calls(method_node, import_map: dict,
         if m in skip:
             continue
         full_class = import_map.get(q) or combined.get(q) or inheritance_field_map.get(q)
+        if not full_class and q in local_var:
+            type_name = local_var[q]
+            full_class = combined.get(type_name) or import_map.get(type_name)
         if not full_class and '.' in q:
-            # 链式访问（如 CardRepository.instance.findCard）
             root = q.split('.')[0]
             full_class = (import_map.get(root) or combined.get(root)
-                          or inheritance_field_map.get(root))
+                          or inheritance_field_map.get(root) or local_var.get(root))
         if full_class and analyzer._is_production_class(full_class):
             key = f"{full_class}.{m}"
             counts[key] = counts.get(key, 0) + 1
@@ -178,11 +189,13 @@ def _build_prod_calls_per_line(method_node,
     combined = combined_import_map or import_map
     field_map = inheritance_field_map or {}
 
-    # 局部变量类型（方法体内）
+    # 局部变量类型 & 形参类型（方法体内）
     local_var: Dict[str, str] = {}
     for _, node in method_node.filter(javalang.tree.LocalVariableDeclaration):
         for declarator in node.declarators:
             local_var[declarator.name] = node.type.name
+    for _, node in method_node.filter(javalang.tree.FormalParameter):
+        local_var[node.name] = node.type.name
 
     per_line: Dict[int, List[str]] = {}
     for _, node in method_node.filter(javalang.tree.MethodInvocation):
