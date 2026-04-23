@@ -86,12 +86,65 @@ def extract_method_code(file_path: Path, class_name: str, method_name: str) -> O
         return None
 
 
+def _run_jar_extract(
+    jar_path: Path,
+    project_path: Path,
+    project_name: str,
+    file_arg: str,
+    method_name: str,
+    debug_output: Path,
+) -> bool:
+    """调用 jar 的 --debug 模式，返回是否成功。"""
+    # 优先使用 JAVA_HOME 下的 java
+    java_home = os.environ.get('JAVA_HOME', '')
+    java_bin = os.path.join(java_home, 'bin', 'java') if java_home else 'java'
+    if java_home and not os.path.exists(java_bin):
+        java_bin = 'java'
+
+    cmd = [
+        java_bin, '-jar', str(jar_path),
+        '--debug',
+        '--root', str(project_path),
+        '--name', project_name,
+        '--file', file_arg,
+        '--method', method_name,
+        '--debug-output', str(debug_output),
+    ]
+    logger.info(f"[jar] cmd: {' '.join(cmd)}")
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        encoding='utf-8',
+    )
+
+    if result.returncode != 0:
+        logger.warning(
+            f"[jar] exit_code={result.returncode}, file_arg={file_arg}, "
+            f"stderr={result.stderr.strip()[:500]}, stdout={result.stdout.strip()[:500]}"
+        )
+        return False
+
+    if not debug_output.exists():
+        logger.warning(f"[jar] debug-output not found: {debug_output} (file_arg={file_arg})")
+        return False
+
+    if not debug_output.read_text(encoding='utf-8').strip():
+        logger.warning(f"[jar] debug-output is empty: {debug_output} (file_arg={file_arg})")
+        return False
+
+    return True
+
+
 def extract_method_code_via_jar(
     jar_path: Path,
     project_path: Path,
     project_name: str,
     test_file: Path,
     method_name: str,
+    debug_output_path: Path,
 ) -> Optional[str]:
     """
     通过 maven-test-metrics jar 的 --debug 模式提取方法代码。
@@ -99,57 +152,26 @@ def extract_method_code_via_jar(
     调用命令格式：
         java -jar <jar> --debug --root <project> --name <project_name>
               --file <Test.java> --method <method_name>
-              --debug-output <tmpfile>
+              --debug-output <debug_output_path>
+
+    兼容性处理：jar 对 --file 的解析可能支持带后缀或不带后缀，
+    因此先尝试 test_file.name，失败后再尝试 test_file.stem。
     """
-    java_file_name = test_file.name
-    debug_output = None
+    # 尝试 1: 完整绝对路径（带 .java 后缀）
+    if _run_jar_extract(
+        jar_path, project_path, project_name,
+        str(test_file), method_name, debug_output_path
+    ):
+        return debug_output_path.read_text(encoding='utf-8')
 
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode='w', suffix='_debug.txt', delete=False, encoding='utf-8'
-        ) as tmp:
-            debug_output = tmp.name
+    # 尝试 2: 完整绝对路径（不带 .java 后缀）
+    if _run_jar_extract(
+        jar_path, project_path, project_name,
+        str(test_file.with_suffix('')), method_name, debug_output_path
+    ):
+        return debug_output_path.read_text(encoding='utf-8')
 
-        cmd = [
-            'java', '-jar', str(jar_path),
-            '--debug',
-            '--root', str(project_path),
-            '--name', project_name,
-            '--file', java_file_name,
-            '--method', method_name,
-            '--debug-output', debug_output,
-        ]
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            encoding='utf-8',
-        )
-
-        if result.returncode != 0:
-            return None
-
-        output_path = Path(debug_output)
-        if not output_path.exists():
-            return None
-
-        method_code = output_path.read_text(encoding='utf-8')
-        if not method_code.strip():
-            return None
-
-        return method_code
-
-    except Exception:
-        return None
-
-    finally:
-        if debug_output:
-            try:
-                os.unlink(debug_output)
-            except Exception:
-                pass
+    return None
 
 
 def find_test_file(projects_root: Path, project_name: str, full_class_name: str) -> Optional[Path]:
@@ -219,18 +241,6 @@ def extract_test_case_code(
     if not test_file:
         return False, f"Test file not found: {test_full_name}"
 
-    # 提取方法代码
-    if jar_path and jar_path.exists():
-        project_path = projects_root / project_name
-        method_code = extract_method_code_via_jar(
-            jar_path, project_path, project_name, test_file, method_name
-        )
-    else:
-        method_code = extract_method_code(test_file, class_name, method_name)
-
-    if not method_code:
-        return False, f"Method code not found: {test_full_name}"
-
     # 生成多级目录结构
     project_parts = project_name.split('/')
     if len(project_parts) == 2:
@@ -244,21 +254,42 @@ def extract_test_case_code(
 
     output_dir_structure = output_dir / owner / repo / safe_class_name
     output_file = output_dir_structure / f"{safe_method_name}.java"
+    txt_output_file = output_dir_structure / f"{safe_method_name}.txt"
 
-    # 保存代码片段
-    try:
+    # 提取方法代码
+    if jar_path and jar_path.exists():
+        project_path = projects_root / project_name
         output_dir_structure.mkdir(parents=True, exist_ok=True)
+        method_code = extract_method_code_via_jar(
+            jar_path, project_path, project_name, test_file, method_name, txt_output_file
+        )
+        if not method_code:
+            return False, f"Method code not found: {test_full_name}"
 
-        header = build_header(csv_row)
+        # jar 模式：只生成 .txt，不再生成 .java
+        try:
+            header = build_header(csv_row)
+            with open(txt_output_file, 'w', encoding='utf-8') as f:
+                f.write(header)
+                f.write(method_code)
+            return True, f"Extracted: {txt_output_file.relative_to(output_dir)}"
+        except Exception as e:
+            return False, f"Error saving code to {txt_output_file}: {e}"
+    else:
+        method_code = extract_method_code(test_file, class_name, method_name)
+        if not method_code:
+            return False, f"Method code not found: {test_full_name}"
 
-        with open(output_file, 'w', encoding='utf-8') as f:
-            f.write(header)
-            f.write(method_code)
-
-        return True, f"Extracted: {output_file.relative_to(output_dir)}"
-
-    except Exception as e:
-        return False, f"Error saving code to {output_file}: {e}"
+        # Python 正则模式：生成 .java 文件
+        try:
+            output_dir_structure.mkdir(parents=True, exist_ok=True)
+            header = build_header(csv_row)
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(header)
+                f.write(method_code)
+            return True, f"Extracted: {output_file.relative_to(output_dir)}"
+        except Exception as e:
+            return False, f"Error saving code to {output_file}: {e}"
 
 
 def _worker_extract(args: Tuple[Dict[str, str], Path, Path, Optional[Path]]) -> Tuple[bool, str]:

@@ -58,4 +58,4 @@ test*.py
 
 *.jar
 
-integration_benchmark_v7_n5/
+integration_benchmark_*/

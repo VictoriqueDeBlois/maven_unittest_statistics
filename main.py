@@ -100,11 +100,24 @@ def build_integration_benchmark(
 
 
 if __name__ == '__main__':
+    load_dotenv(override=True)
+
     args = [
         '--csv', 'integration_benchmark_v7_n5.csv',
         '--root', '/data/xuhaoran/github',
         '--output', 'integration_benchmark_v7_n5',
         '--mode', 'all'
+    ]
+    with patch('sys.argv', ['main.py'] + args):
+        extract_test_snippets.main()
+    
+    args = [
+        '--csv', 'integration_benchmark_v7_n5.csv',
+        '--root', '/data/xuhaoran/github',
+        '--output', 'integration_benchmark_v7_n5_jar',
+        '--mode', 'all',
+        '--jar', 'maven-test-metrics-1.0-SNAPSHOT.jar',
+        '--workers', '20'
     ]
     with patch('sys.argv', ['main.py'] + args):
         extract_test_snippets.main()
