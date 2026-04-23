@@ -54,3 +54,5 @@ test_*.py
 
 test*.py
 
+*_workdir/
+
