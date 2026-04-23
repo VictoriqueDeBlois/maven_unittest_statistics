@@ -100,17 +100,11 @@ def build_integration_benchmark(
 
 
 if __name__ == '__main__':
-    load_dotenv(override=True)
-
-    import os
-    print(f"JAVA_HOME = {os.environ.get('JAVA_HOME', '未设置')}")
-
     args = [
-        '--projects', 'all_repos.txt',
+        '--csv', 'integration_benchmark_v7_n5.csv',
         '--root', '/data/xuhaoran/github',
-        '--output', 'all_tests_jar.csv',
-        '--jar', 'maven-test-metrics-1.0-SNAPSHOT.jar',  # jar 包的实际路径
+        '--output', 'integration_benchmark_v7_n5',
+        '--mode', 'all'
     ]
-
-    with patch('sys.argv', ['maven_test_metrics_jar.py'] + args):
-        maven_test_metrics_jar.main()
+    with patch('sys.argv', ['main.py'] + args):
+        extract_test_snippets.main()

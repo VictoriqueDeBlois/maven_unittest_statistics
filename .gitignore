@@ -57,3 +57,5 @@ test*.py
 *_workdir/
 
 *.jar
+
+integration_benchmark_v7_n5/

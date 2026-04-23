@@ -1,77 +1,73 @@
 #!/usr/bin/env python3
 """
-测试用例代码片段提取工具
+测试用例代码片段提取工具（多进程版）
 
 从CSV文件中读取测试用例信息，提取对应的源代码片段到单独的文件中。
+支持两种提取方式：
+1. Python 正则提取（默认）
+2. 通过 maven-test-metrics jar 的 --debug 模式提取
 """
 
-import os
+import argparse
 import csv
-import re
-from pathlib import Path
-from typing import Optional, List, Dict
 import logging
+import os
+import re
+import subprocess
+import tempfile
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+from tqdm import tqdm
+
+# 日志文件路径（与脚本同名）
+_LOG_FILE = Path(__file__).with_suffix('.log')
+
+
+def _setup_logger() -> logging.Logger:
+    """配置日志输出到文件，避免控制台输出。"""
+    log = logging.getLogger(__name__)
+    if not log.handlers:
+        handler = logging.FileHandler(_LOG_FILE, encoding='utf-8')
+        handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        log.addHandler(handler)
+        log.setLevel(logging.INFO)
+        # 阻止日志向上传播到 root logger，防止在控制台重复输出
+        log.propagate = False
+    return log
+
+
+logger = _setup_logger()
 
 
 def sanitize_filename(name: str) -> str:
     """
     清理文件名，移除或替换非法字符
-
-    Args:
-        name: 原始文件名
-
-    Returns:
-        清理后的文件名
     """
-    # 替换非法字符为下划线
     name = re.sub(r'[<>:"/\\|?*]', '_', name)
-    # 替换 # 为双下划线
     name = name.replace('#', '__')
-    # 替换空格
     name = name.replace(' ', '_')
     return name
 
 
 def extract_method_code(file_path: Path, class_name: str, method_name: str) -> Optional[str]:
     """
-    从Java文件中提取指定方法的代码
-
-    Args:
-        file_path: Java文件路径
-        class_name: 类名（简单类名，不含包名）
-        method_name: 方法名
-
-    Returns:
-        方法的完整代码，如果未找到则返回None
+    从Java文件中提取指定方法的代码（Python 正则方式）
     """
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
 
-        # 简单的方法提取逻辑（基于大括号匹配）
-        # 查找方法声明模式，支持注解
-        # 匹配模式: @Test ... public void methodName(...) {
         pattern = rf'(@\w+\s*(?:\([^)]*\))?\s*)*\s*(?:public|private|protected)?\s+(?:static\s+)?(?:\w+\s+)?{re.escape(method_name)}\s*\([^)]*\)\s*(?:throws\s+\w+(?:,\s*\w+)*)?\s*\{{'
 
         match = re.search(pattern, content)
         if not match:
-            logger.warning(f"Method {method_name} not found in {file_path}")
             return None
 
-        # 找到方法开始位置（从注解开始）
         method_start = match.start()
-
-        # 找到方法体开始的大括号
         brace_start = match.end() - 1
 
-        # 匹配大括号，找到方法结束位置
         brace_count = 1
         pos = brace_start + 1
 
@@ -83,103 +79,169 @@ def extract_method_code(file_path: Path, class_name: str, method_name: str) -> O
             pos += 1
 
         if brace_count == 0:
-            method_code = content[method_start:pos]
-            return method_code
-        else:
-            logger.warning(f"Unclosed braces for method {method_name} in {file_path}")
+            return content[method_start:pos]
+        return None
+
+    except Exception:
+        return None
+
+
+def extract_method_code_via_jar(
+    jar_path: Path,
+    project_path: Path,
+    project_name: str,
+    test_file: Path,
+    method_name: str,
+) -> Optional[str]:
+    """
+    通过 maven-test-metrics jar 的 --debug 模式提取方法代码。
+
+    调用命令格式：
+        java -jar <jar> --debug --root <project> --name <project_name>
+              --file <Test.java> --method <method_name>
+              --debug-output <tmpfile>
+    """
+    java_file_name = test_file.name
+    debug_output = None
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode='w', suffix='_debug.txt', delete=False, encoding='utf-8'
+        ) as tmp:
+            debug_output = tmp.name
+
+        cmd = [
+            'java', '-jar', str(jar_path),
+            '--debug',
+            '--root', str(project_path),
+            '--name', project_name,
+            '--file', java_file_name,
+            '--method', method_name,
+            '--debug-output', debug_output,
+        ]
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            encoding='utf-8',
+        )
+
+        if result.returncode != 0:
             return None
 
-    except Exception as e:
-        logger.error(f"Error extracting method {method_name} from {file_path}: {e}")
+        output_path = Path(debug_output)
+        if not output_path.exists():
+            return None
+
+        method_code = output_path.read_text(encoding='utf-8')
+        if not method_code.strip():
+            return None
+
+        return method_code
+
+    except Exception:
         return None
+
+    finally:
+        if debug_output:
+            try:
+                os.unlink(debug_output)
+            except Exception:
+                pass
 
 
 def find_test_file(projects_root: Path, project_name: str, full_class_name: str) -> Optional[Path]:
     """
     根据项目名和完整类名查找测试文件
-
-    Args:
-        projects_root: 项目根目录
-        project_name: 项目名（如 killme2008/aviatorscript）
-        full_class_name: 完整类名（如 com.example.MyTest）
-
-    Returns:
-        测试文件路径，如果未找到则返回None
     """
     project_path = projects_root / project_name
 
     if not project_path.exists():
-        logger.warning(f"Project path does not exist: {project_path}")
         return None
 
-    # 将完整类名转换为文件路径
-    # com.example.MyTest -> com/example/MyTest.java
     class_path = full_class_name.replace('.', '/') + '.java'
 
-    # 递归查找所有可能的测试文件
     for java_file in project_path.rglob('*.java'):
-        # 检查文件路径是否以class_path结尾
         if str(java_file).endswith(class_path.replace('/', os.sep)):
-            # 确认是在测试目录中
             path_str = str(java_file)
             if '/test/' in path_str or '\\test\\' in path_str:
                 return java_file
 
-    logger.warning(f"Test file not found for {full_class_name} in project {project_name}")
     return None
 
 
+def build_header(csv_row: Dict[str, str]) -> str:
+    """
+    根据CSV行数据动态生成文件头注释。
+    遍历所有列，优先输出 project_name 和 test_full_name，其余随后。
+    """
+    preferred_order = ['project_name', 'test_full_name']
+    lines = []
+
+    # 优先输出 repo 名和测试全名
+    for key in preferred_order:
+        if key in csv_row:
+            lines.append(f"// {key}: {csv_row[key]}")
+
+    # 再输出其余字段
+    for key, value in csv_row.items():
+        if key not in preferred_order:
+            lines.append(f"// {key}: {value}")
+
+    if lines:
+        return "\n".join(lines) + "\n\n"
+    return "\n"
+
+
 def extract_test_case_code(
-        csv_row: Dict[str, str],
-        projects_root: Path,
-        output_dir: Path
-) -> bool:
+    csv_row: Dict[str, str],
+    projects_root: Path,
+    output_dir: Path,
+    jar_path: Optional[Path] = None,
+) -> Tuple[bool, str]:
     """
-    提取单个测试用例的代码并保存到文件
-
-    Args:
-        csv_row: CSV行数据字典
-        projects_root: 所有项目的根目录
-        output_dir: 输出目录
-
-    Returns:
-        是否成功提取
+    提取单个测试用例的代码并保存到文件。
+    返回 (是否成功, 信息消息)
     """
-    project_name = csv_row['project_name']
-    test_full_name = csv_row['test_full_name']
+    project_name = csv_row.get('project_name', '')
+    test_full_name = csv_row.get('test_full_name', '')
 
-    # 解析测试用例全名: com.example.MyTest#testMethod
     if '#' not in test_full_name:
-        logger.warning(f"Invalid test name format: {test_full_name}")
-        return False
+        return False, f"Invalid test name format: {test_full_name}"
 
     full_class_name, method_name = test_full_name.split('#', 1)
-    class_name = full_class_name.split('.')[-1]  # 获取简单类名
+    class_name = full_class_name.split('.')[-1]
 
     # 查找测试文件
     test_file = find_test_file(projects_root, project_name, full_class_name)
     if not test_file:
-        return False
+        return False, f"Test file not found: {test_full_name}"
 
     # 提取方法代码
-    method_code = extract_method_code(test_file, class_name, method_name)
-    if not method_code:
-        return False
+    if jar_path and jar_path.exists():
+        project_path = projects_root / project_name
+        method_code = extract_method_code_via_jar(
+            jar_path, project_path, project_name, test_file, method_name
+        )
+    else:
+        method_code = extract_method_code(test_file, class_name, method_name)
 
-    # 生成多级目录结构: output_dir/owner/repo/classname/methodname.java
-    # project_name 格式: owner/repo (如 killme2008/aviatorscript)
+    if not method_code:
+        return False, f"Method code not found: {test_full_name}"
+
+    # 生成多级目录结构
     project_parts = project_name.split('/')
     if len(project_parts) == 2:
         owner, repo = project_parts
     else:
-        # 如果不是标准的 owner/repo 格式，整体作为 repo
         owner = 'unknown'
         repo = sanitize_filename(project_name.replace('/', '_'))
-    
+
     safe_class_name = sanitize_filename(class_name)
     safe_method_name = sanitize_filename(method_name)
-    
-    # 构建多级目录路径
+
     output_dir_structure = output_dir / owner / repo / safe_class_name
     output_file = output_dir_structure / f"{safe_method_name}.java"
 
@@ -187,70 +249,104 @@ def extract_test_case_code(
     try:
         output_dir_structure.mkdir(parents=True, exist_ok=True)
 
-        # 添加文件头注释
-        header = f"""// Project: {project_name}
-// Test: {test_full_name}
-// Oracle Length: {csv_row.get('oracle_length', 'N/A')}
-// Assertions: {csv_row.get('assertion_count', 'N/A')}
-// Mock Verifications: {csv_row.get('mock_verify_count', 'N/A')}
-// Uses Mock: {csv_row.get('uses_mock', 'N/A')}
-// Called Methods: {csv_row.get('called_project_methods', 'N/A')}
-
-"""
+        header = build_header(csv_row)
 
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(header)
             f.write(method_code)
 
-        logger.info(f"Extracted: {output_file.relative_to(output_dir)}")
-        return True
+        return True, f"Extracted: {output_file.relative_to(output_dir)}"
 
     except Exception as e:
-        logger.error(f"Error saving code to {output_file}: {e}")
-        return False
+        return False, f"Error saving code to {output_file}: {e}"
 
 
-def extract_top_n_test_cases(
-        csv_file: Path,
-        projects_root: Path,
-        output_dir: Path,
-        top_n: int = 100,
-        sort_by: str = 'oracle_length'
-) -> int:
-    """
-    提取CSV中指标最大的前N个测试用例的代码
+def _worker_extract(args: Tuple[Dict[str, str], Path, Path, Optional[Path]]) -> Tuple[bool, str]:
+    """多进程 worker 包装函数（必须是模块级函数才能被 pickle）。"""
+    # 子进程需要独立初始化文件日志
+    _setup_logger()
+    csv_row, projects_root, output_dir, jar_path = args
+    return extract_test_case_code(csv_row, projects_root, output_dir, jar_path)
 
-    Args:
-        csv_file: CSV文件路径
-        projects_root: 所有项目的根目录
-        output_dir: 输出目录
-        top_n: 提取的用例数量
-        sort_by: 排序字段 ('oracle_length', 'assertion_count', 'mock_verify_count')
 
-    Returns:
-        成功提取的用例数量
-    """
-    logger.info(f"Reading CSV file: {csv_file}")
-
-    # 读取CSV
-    test_cases = []
+def _read_csv_rows(csv_file: Path) -> List[Dict[str, str]]:
+    """读取CSV文件并返回所有行。"""
+    rows = []
     try:
         with open(csv_file, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                test_cases.append(row)
+                rows.append(row)
     except Exception as e:
         logger.error(f"Error reading CSV file: {e}")
+    return rows
+
+
+def _extract_cases_parallel(
+    test_cases: List[Dict[str, str]],
+    projects_root: Path,
+    output_dir: Path,
+    jar_path: Optional[Path],
+    workers: int,
+    desc: str,
+) -> int:
+    """通用并行提取逻辑。"""
+    if not test_cases:
+        logger.info("No test cases to extract.")
         return 0
 
+    logger.info(f"Extracting {len(test_cases)} test cases using {workers} workers")
+
+    args_list = [
+        (tc, projects_root, output_dir, jar_path)
+        for tc in test_cases
+    ]
+
+    success_count = 0
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        future_to_case = {
+            executor.submit(_worker_extract, args): args[0]
+            for args in args_list
+        }
+
+        for future in tqdm(as_completed(future_to_case), total=len(future_to_case), desc=desc):
+            test_case = future_to_case[future]
+            try:
+                success, msg = future.result()
+            except Exception as e:
+                success = False
+                msg = f"Exception: {e}"
+
+            if success:
+                success_count += 1
+                logger.info(f"OK  : {test_case.get('test_full_name', '')} -> {msg}")
+            else:
+                logger.warning(f"FAIL: {test_case.get('test_full_name', '')} -> {msg}")
+
+    logger.info(f"Successfully extracted {success_count}/{len(test_cases)} test cases")
+    return success_count
+
+
+def extract_top_n_test_cases(
+    csv_file: Path,
+    projects_root: Path,
+    output_dir: Path,
+    top_n: int = 100,
+    sort_by: str = 'oracle_length',
+    jar_path: Optional[Path] = None,
+    workers: int = 4,
+) -> int:
+    """
+    提取CSV中指标最大的前N个测试用例的代码（多进程）。
+    """
+    logger.info(f"Reading CSV file: {csv_file}")
+    test_cases = _read_csv_rows(csv_file)
     logger.info(f"Found {len(test_cases)} test cases in CSV")
 
-    # 按指定字段排序
     if sort_by not in ['oracle_length', 'assertion_count', 'mock_verify_count']:
         logger.warning(f"Invalid sort_by field: {sort_by}, using 'oracle_length'")
         sort_by = 'oracle_length'
 
-    # 转换为整数并排序
     for tc in test_cases:
         try:
             tc[f'{sort_by}_int'] = int(tc.get(sort_by, 0))
@@ -258,43 +354,26 @@ def extract_top_n_test_cases(
             tc[f'{sort_by}_int'] = 0
 
     test_cases.sort(key=lambda x: x[f'{sort_by}_int'], reverse=True)
-
-    # 提取前N个
     top_cases = test_cases[:top_n]
     logger.info(f"Extracting top {len(top_cases)} test cases by {sort_by}")
 
-    success_count = 0
-    for i, test_case in enumerate(top_cases, 1):
-        logger.info(f"Processing {i}/{len(top_cases)}: {test_case['test_full_name']} ({sort_by}={test_case[sort_by]})")
-
-        if extract_test_case_code(test_case, projects_root, output_dir):
-            success_count += 1
-
-    logger.info(f"Successfully extracted {success_count}/{len(top_cases)} test cases")
-    return success_count
+    return _extract_cases_parallel(
+        top_cases, projects_root, output_dir, jar_path, workers, desc="Top-N extraction"
+    )
 
 
 def extract_specific_test_cases(
-        csv_file: Path,
-        projects_root: Path,
-        output_dir: Path,
-        test_names: List[str]
+    csv_file: Path,
+    projects_root: Path,
+    output_dir: Path,
+    test_names: List[str],
+    jar_path: Optional[Path] = None,
+    workers: int = 4,
 ) -> int:
     """
-    提取指定的测试用例代码
-
-    Args:
-        csv_file: CSV文件路径
-        projects_root: 所有项目的根目录
-        output_dir: 输出目录
-        test_names: 测试用例全名列表（格式: com.example.MyTest#testMethod）
-
-    Returns:
-        成功提取的用例数量
+    提取指定的测试用例代码（多进程）。
     """
     logger.info(f"Reading CSV file: {csv_file}")
-
-    # 读取CSV并建立索引
     test_cases_map = {}
     try:
         with open(csv_file, 'r', encoding='utf-8') as f:
@@ -305,72 +384,40 @@ def extract_specific_test_cases(
         logger.error(f"Error reading CSV file: {e}")
         return 0
 
-    logger.info(f"Found {len(test_cases_map)} test cases in CSV")
-
-    success_count = 0
+    test_cases = []
     for test_name in test_names:
         if test_name not in test_cases_map:
             logger.warning(f"Test case not found in CSV: {test_name}")
             continue
+        test_cases.append(test_cases_map[test_name])
 
-        logger.info(f"Processing: {test_name}")
-        test_case = test_cases_map[test_name]
-
-        if extract_test_case_code(test_case, projects_root, output_dir):
-            success_count += 1
-
-    logger.info(f"Successfully extracted {success_count}/{len(test_names)} test cases")
-    return success_count
+    return _extract_cases_parallel(
+        test_cases, projects_root, output_dir, jar_path, workers, desc="Specific extraction"
+    )
 
 
 def extract_all_test_cases(
-        csv_file: Path,
-        projects_root: Path,
-        output_dir: Path
+    csv_file: Path,
+    projects_root: Path,
+    output_dir: Path,
+    jar_path: Optional[Path] = None,
+    workers: int = 4,
 ) -> int:
     """
-    提取CSV中的所有测试用例代码
-
-    Args:
-        csv_file: CSV文件路径
-        projects_root: 所有项目的根目录
-        output_dir: 输出目录
-
-    Returns:
-        成功提取的用例数量
+    提取CSV中的所有测试用例代码（多进程）。
     """
     logger.info(f"Reading CSV file: {csv_file}")
-
-    # 读取CSV
-    test_cases = []
-    try:
-        with open(csv_file, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                test_cases.append(row)
-    except Exception as e:
-        logger.error(f"Error reading CSV file: {e}")
-        return 0
-
+    test_cases = _read_csv_rows(csv_file)
     logger.info(f"Found {len(test_cases)} test cases in CSV")
-    logger.info(f"Extracting all test cases...")
 
-    success_count = 0
-    for i, test_case in enumerate(test_cases, 1):
-        logger.info(f"Processing {i}/{len(test_cases)}: {test_case['test_full_name']}")
-
-        if extract_test_case_code(test_case, projects_root, output_dir):
-            success_count += 1
-
-    logger.info(f"Successfully extracted {success_count}/{len(test_cases)} test cases")
-    return success_count
+    return _extract_cases_parallel(
+        test_cases, projects_root, output_dir, jar_path, workers, desc="All extraction"
+    )
 
 
 def main():
     """主函数 - 命令行工具"""
-    import argparse
-
-    parser = argparse.ArgumentParser(description='测试用例代码片段提取工具')
+    parser = argparse.ArgumentParser(description='测试用例代码片段提取工具（多进程版）')
     parser.add_argument('--csv', required=True, help='CSV文件路径')
     parser.add_argument('--root', required=True, help='所有项目的根目录')
     parser.add_argument('--output', required=True, help='输出目录')
@@ -383,12 +430,17 @@ def main():
                         help='排序字段（mode=top时有效，默认oracle_length）')
     parser.add_argument('--test-names', nargs='+',
                         help='测试用例全名列表（mode=specific时有效）')
+    parser.add_argument('--jar', default=None,
+                        help='maven-test-metrics jar 路径（启用jar模式提取代码）')
+    parser.add_argument('--workers', type=int, default=4,
+                        help='并行进程数（默认4）')
 
     args = parser.parse_args()
 
     csv_file = Path(args.csv)
     projects_root = Path(args.root)
     output_dir = Path(args.output)
+    jar_path = Path(args.jar) if args.jar else None
 
     if not csv_file.exists():
         logger.error(f"CSV file not found: {csv_file}")
@@ -398,13 +450,19 @@ def main():
         logger.error(f"Projects root not found: {projects_root}")
         return 1
 
+    if jar_path and not jar_path.exists():
+        logger.error(f"Jar file not found: {jar_path}")
+        return 1
+
     if args.mode == 'top':
         extract_top_n_test_cases(
             csv_file,
             projects_root,
             output_dir,
             top_n=args.top_n,
-            sort_by=args.sort_by
+            sort_by=args.sort_by,
+            jar_path=jar_path,
+            workers=args.workers,
         )
     elif args.mode == 'specific':
         if not args.test_names:
@@ -415,13 +473,17 @@ def main():
             csv_file,
             projects_root,
             output_dir,
-            test_names=args.test_names
+            test_names=args.test_names,
+            jar_path=jar_path,
+            workers=args.workers,
         )
     elif args.mode == 'all':
         extract_all_test_cases(
             csv_file,
             projects_root,
-            output_dir
+            output_dir,
+            jar_path=jar_path,
+            workers=args.workers,
         )
 
     return 0
