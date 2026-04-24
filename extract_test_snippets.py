@@ -93,6 +93,7 @@ def _run_jar_extract(
     file_arg: str,
     method_name: str,
     debug_output: Path,
+    format: str = "annotated",
 ) -> bool:
     """调用 jar 的 --debug 模式，返回是否成功。"""
     # 优先使用 JAVA_HOME 下的 java
@@ -104,6 +105,7 @@ def _run_jar_extract(
     cmd = [
         java_bin, '-jar', str(jar_path),
         '--debug',
+        '--format', format,
         '--root', str(project_path),
         '--name', project_name,
         '--file', file_arg,
@@ -145,6 +147,7 @@ def extract_method_code_via_jar(
     test_file: Path,
     method_name: str,
     debug_output_path: Path,
+    format: str = "annotated",
 ) -> Optional[str]:
     """
     通过 maven-test-metrics jar 的 --debug 模式提取方法代码。
@@ -160,14 +163,14 @@ def extract_method_code_via_jar(
     # 尝试 1: 完整绝对路径（带 .java 后缀）
     if _run_jar_extract(
         jar_path, project_path, project_name,
-        str(test_file), method_name, debug_output_path
+        str(test_file), method_name, debug_output_path, format
     ):
         return debug_output_path.read_text(encoding='utf-8')
 
     # 尝试 2: 完整绝对路径（不带 .java 后缀）
     if _run_jar_extract(
         jar_path, project_path, project_name,
-        str(test_file.with_suffix('')), method_name, debug_output_path
+        str(test_file.with_suffix('')), method_name, debug_output_path, format
     ):
         return debug_output_path.read_text(encoding='utf-8')
 
@@ -222,6 +225,7 @@ def extract_test_case_code(
     projects_root: Path,
     output_dir: Path,
     jar_path: Optional[Path] = None,
+    jar_format: str = "annotated",
 ) -> Tuple[bool, str]:
     """
     提取单个测试用例的代码并保存到文件。
@@ -260,21 +264,30 @@ def extract_test_case_code(
     if jar_path and jar_path.exists():
         project_path = projects_root / project_name
         output_dir_structure.mkdir(parents=True, exist_ok=True)
-        method_code = extract_method_code_via_jar(
-            jar_path, project_path, project_name, test_file, method_name, txt_output_file
-        )
-        if not method_code:
-            return False, f"Method code not found: {test_full_name}"
 
-        # jar 模式：只生成 .txt，不再生成 .java
-        try:
-            header = build_header(csv_row)
-            with open(txt_output_file, 'w', encoding='utf-8') as f:
-                f.write(header)
-                f.write(method_code)
-            return True, f"Extracted: {txt_output_file.relative_to(output_dir)}"
-        except Exception as e:
-            return False, f"Error saving code to {txt_output_file}: {e}"
+        if jar_format == "raw-java":
+            # raw-java 模式：jar 直接生成完整的 .java 文件（含 import、字段、调用链）
+            method_code = extract_method_code_via_jar(
+                jar_path, project_path, project_name, test_file, method_name, output_file, format="raw-java"
+            )
+            if not method_code:
+                return False, f"Method code not found: {test_full_name}"
+            return True, f"Extracted: {output_file.relative_to(output_dir)}"
+        else:
+            # annotated 模式：生成带标注的 .txt 文件
+            method_code = extract_method_code_via_jar(
+                jar_path, project_path, project_name, test_file, method_name, txt_output_file, format="annotated"
+            )
+            if not method_code:
+                return False, f"Method code not found: {test_full_name}"
+            try:
+                header = build_header(csv_row)
+                with open(txt_output_file, 'w', encoding='utf-8') as f:
+                    f.write(header)
+                    f.write(method_code)
+                return True, f"Extracted: {txt_output_file.relative_to(output_dir)}"
+            except Exception as e:
+                return False, f"Error saving code to {txt_output_file}: {e}"
     else:
         method_code = extract_method_code(test_file, class_name, method_name)
         if not method_code:
@@ -292,12 +305,12 @@ def extract_test_case_code(
             return False, f"Error saving code to {output_file}: {e}"
 
 
-def _worker_extract(args: Tuple[Dict[str, str], Path, Path, Optional[Path]]) -> Tuple[bool, str]:
+def _worker_extract(args: Tuple[Dict[str, str], Path, Path, Optional[Path], str]) -> Tuple[bool, str]:
     """多进程 worker 包装函数（必须是模块级函数才能被 pickle）。"""
     # 子进程需要独立初始化文件日志
     _setup_logger()
-    csv_row, projects_root, output_dir, jar_path = args
-    return extract_test_case_code(csv_row, projects_root, output_dir, jar_path)
+    csv_row, projects_root, output_dir, jar_path, jar_format = args
+    return extract_test_case_code(csv_row, projects_root, output_dir, jar_path, jar_format)
 
 
 def _read_csv_rows(csv_file: Path) -> List[Dict[str, str]]:
@@ -320,6 +333,7 @@ def _extract_cases_parallel(
     jar_path: Optional[Path],
     workers: int,
     desc: str,
+    jar_format: str = "annotated",
 ) -> int:
     """通用并行提取逻辑。"""
     if not test_cases:
@@ -329,7 +343,7 @@ def _extract_cases_parallel(
     logger.info(f"Extracting {len(test_cases)} test cases using {workers} workers")
 
     args_list = [
-        (tc, projects_root, output_dir, jar_path)
+        (tc, projects_root, output_dir, jar_path, jar_format)
         for tc in test_cases
     ]
 
@@ -366,6 +380,7 @@ def extract_top_n_test_cases(
     sort_by: str = 'oracle_length',
     jar_path: Optional[Path] = None,
     workers: int = 4,
+    jar_format: str = "annotated",
 ) -> int:
     """
     提取CSV中指标最大的前N个测试用例的代码（多进程）。
@@ -389,7 +404,7 @@ def extract_top_n_test_cases(
     logger.info(f"Extracting top {len(top_cases)} test cases by {sort_by}")
 
     return _extract_cases_parallel(
-        top_cases, projects_root, output_dir, jar_path, workers, desc="Top-N extraction"
+        top_cases, projects_root, output_dir, jar_path, workers, desc="Top-N extraction", jar_format=jar_format
     )
 
 
@@ -400,6 +415,7 @@ def extract_specific_test_cases(
     test_names: List[str],
     jar_path: Optional[Path] = None,
     workers: int = 4,
+    jar_format: str = "annotated",
 ) -> int:
     """
     提取指定的测试用例代码（多进程）。
@@ -423,7 +439,7 @@ def extract_specific_test_cases(
         test_cases.append(test_cases_map[test_name])
 
     return _extract_cases_parallel(
-        test_cases, projects_root, output_dir, jar_path, workers, desc="Specific extraction"
+        test_cases, projects_root, output_dir, jar_path, workers, desc="Specific extraction", jar_format=jar_format
     )
 
 
@@ -433,6 +449,7 @@ def extract_all_test_cases(
     output_dir: Path,
     jar_path: Optional[Path] = None,
     workers: int = 4,
+    jar_format: str = "annotated",
 ) -> int:
     """
     提取CSV中的所有测试用例代码（多进程）。
@@ -442,7 +459,7 @@ def extract_all_test_cases(
     logger.info(f"Found {len(test_cases)} test cases in CSV")
 
     return _extract_cases_parallel(
-        test_cases, projects_root, output_dir, jar_path, workers, desc="All extraction"
+        test_cases, projects_root, output_dir, jar_path, workers, desc="All extraction", jar_format=jar_format
     )
 
 
@@ -463,6 +480,8 @@ def main():
                         help='测试用例全名列表（mode=specific时有效）')
     parser.add_argument('--jar', default=None,
                         help='maven-test-metrics jar 路径（启用jar模式提取代码）')
+    parser.add_argument('--format', choices=['annotated', 'raw-java'], default='annotated',
+                        help='jar 模式输出格式：annotated=带标注的txt（默认）, raw-java=纯代码java（用于LLM benchmark）')
     parser.add_argument('--workers', type=int, default=4,
                         help='并行进程数（默认4）')
 
@@ -472,6 +491,7 @@ def main():
     projects_root = Path(args.root)
     output_dir = Path(args.output)
     jar_path = Path(args.jar) if args.jar else None
+    jar_format = args.format if jar_path else "annotated"
 
     if not csv_file.exists():
         logger.error(f"CSV file not found: {csv_file}")
@@ -494,6 +514,7 @@ def main():
             sort_by=args.sort_by,
             jar_path=jar_path,
             workers=args.workers,
+            jar_format=jar_format,
         )
     elif args.mode == 'specific':
         if not args.test_names:
@@ -507,6 +528,7 @@ def main():
             test_names=args.test_names,
             jar_path=jar_path,
             workers=args.workers,
+            jar_format=jar_format,
         )
     elif args.mode == 'all':
         extract_all_test_cases(
@@ -515,6 +537,7 @@ def main():
             output_dir,
             jar_path=jar_path,
             workers=args.workers,
+            jar_format=jar_format,
         )
 
     return 0

@@ -102,22 +102,26 @@ def build_integration_benchmark(
 if __name__ == '__main__':
     load_dotenv(override=True)
 
-    args = [
-        '--csv', 'integration_benchmark_v7_n5.csv',
-        '--root', '/data/xuhaoran/github',
-        '--output', 'integration_benchmark_v7_n5',
-        '--mode', 'all'
-    ]
-    with patch('sys.argv', ['main.py'] + args):
-        extract_test_snippets.main()
+    # args = [
+    #     '--csv', 'integration_benchmark_v7_n5.csv',
+    #     '--root', '/data/xuhaoran/github',
+    #     '--output', 'benchmark_annotated',
+    #     '--mode', 'all',
+    #     '--workers', '20',
+    #     '--jar', '/data/xuhaoran/idea/maven-test-metrics-java/target/maven-test-metrics-1.0-SNAPSHOT.jar',
+    #     '--format', 'annotated'
+    # ]
+    # with patch('sys.argv', ['main.py'] + args):
+    #     extract_test_snippets.main()
     
     args = [
         '--csv', 'integration_benchmark_v7_n5.csv',
         '--root', '/data/xuhaoran/github',
-        '--output', 'integration_benchmark_v7_n5_jar',
+        '--output', 'benchmark_raw_java',
         '--mode', 'all',
-        '--jar', 'maven-test-metrics-1.0-SNAPSHOT.jar',
-        '--workers', '20'
+        '--workers', '20',
+        '--jar', '/data/xuhaoran/idea/maven-test-metrics-java/target/maven-test-metrics-1.0-SNAPSHOT.jar',
+        '--format', 'raw-java'
     ]
     with patch('sys.argv', ['main.py'] + args):
         extract_test_snippets.main()
