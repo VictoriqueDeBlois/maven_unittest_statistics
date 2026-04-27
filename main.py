@@ -55,7 +55,7 @@ def build_integration_benchmark(
       2. 用激进方案筛选（called_packages_count >= N, no mock）
       3. 项目级采样（每项目取 Top-K）
     """
-    load_dotenv()
+    load_dotenv(override=True)
 
     import os
     print(f"JAVA_HOME = {os.environ.get('JAVA_HOME', '未设置')}")
@@ -91,31 +91,22 @@ def build_integration_benchmark(
         max_per_project=max_per_project,
     )
 
-    print(f"\n{'='*60}")
-    print("Benchmark 构建完成！")
-    print(f"  原始数据: {all_tests_csv}")
-    print(f"  筛选结果: {selected_csv}")
-    print(f"  最终采样: {benchmark_csv}")
-    print(f"{'='*60}")
-
-
-if __name__ == '__main__':
-    load_dotenv(override=True)
-
-    # args = [
-    #     '--csv', 'integration_benchmark_v7_n5.csv',
-    #     '--root', '/data/xuhaoran/github',
-    #     '--output', 'benchmark_annotated',
-    #     '--mode', 'all',
-    #     '--workers', '20',
-    #     '--jar', '/data/xuhaoran/idea/maven-test-metrics-java/target/maven-test-metrics-1.0-SNAPSHOT.jar',
-    #     '--format', 'annotated'
-    # ]
-    # with patch('sys.argv', ['main.py'] + args):
-    #     extract_test_snippets.main()
-    
+    # 步骤 4：提取代码
+    print(f"\n[步骤 4/4] 提取代码")
     args = [
-        '--csv', 'integration_benchmark_v7_n5.csv',
+        '--csv', benchmark_csv,
+        '--root', '/data/xuhaoran/github',
+        '--output', 'benchmark_annotated',
+        '--mode', 'all',
+        '--workers', '20',
+        '--jar', '/data/xuhaoran/idea/maven-test-metrics-java/target/maven-test-metrics-1.0-SNAPSHOT.jar',
+        '--format', 'annotated'
+    ]
+    with patch('sys.argv', ['main.py'] + args):
+        extract_test_snippets.main()
+
+    args = [
+        '--csv', benchmark_csv,
         '--root', '/data/xuhaoran/github',
         '--output', 'benchmark_raw_java',
         '--mode', 'all',
@@ -125,3 +116,22 @@ if __name__ == '__main__':
     ]
     with patch('sys.argv', ['main.py'] + args):
         extract_test_snippets.main()
+
+    print(f"\n{'='*60}")
+    print("Benchmark 构建完成！")
+    print(f"  原始数据: {all_tests_csv}")
+    print(f"  筛选结果: {selected_csv}")
+    print(f"  最终采样: {benchmark_csv}")
+    print(f"{'='*60}")
+
+
+if __name__ == '__main__':
+    args = [
+        '--projects', 'integration_benchmark_v7_n5_project_names.txt',
+        '--root', '/data/xuhaoran/github',
+        '--output', 'available_maven_tests.csv',
+        '--parallel', '8'
+    ]
+
+    with patch('sys.argv', ['main.py'] + args):
+        run_maven_tests.main()
