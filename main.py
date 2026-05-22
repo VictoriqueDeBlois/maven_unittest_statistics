@@ -126,12 +126,39 @@ def build_integration_benchmark(
 
 
 if __name__ == '__main__':
-    args = [
-        '--projects', 'integration_benchmark_v7_n5_project_names.txt',
-        '--root', '/data/xuhaoran/github',
-        '--output', 'available_maven_tests.csv',
-        '--parallel', '8'
-    ]
+    # args = [
+    #     '--projects', 'integration_benchmark_v7_n5_project_names.txt',
+    #     '--root', '/data/xuhaoran/github',
+    #     '--output', 'available_maven_tests.csv',
+    #     '--parallel', '8'
+    # ]
+    #
+    # with patch('sys.argv', ['main.py'] + args):
+    #     run_maven_tests.main()
+    # 步骤 4：提取代码
+    print(f"\n[步骤 4/4] 提取代码")
+    benchmark_csv = 'balanced_benchmark_representative/balanced_tests.csv'
 
+    args = [
+        '--csv', benchmark_csv,
+        '--root', '/data/xuhaoran/github',
+        '--output', 'balanced_benchmark_representative/testcases/annotated',
+        '--mode', 'all',
+        '--workers', '20',
+        '--jar', '/data/xuhaoran/idea/maven-test-metrics-java/target/maven-test-metrics-1.0-SNAPSHOT.jar',
+        '--format', 'annotated'
+    ]
     with patch('sys.argv', ['main.py'] + args):
-        run_maven_tests.main()
+        extract_test_snippets.main()
+
+    args = [
+        '--csv', benchmark_csv,
+        '--root', '/data/xuhaoran/github',
+        '--output', 'balanced_benchmark_representative/testcases/raw_java',
+        '--mode', 'all',
+        '--workers', '20',
+        '--jar', '/data/xuhaoran/idea/maven-test-metrics-java/target/maven-test-metrics-1.0-SNAPSHOT.jar',
+        '--format', 'raw-java'
+    ]
+    with patch('sys.argv', ['main.py'] + args):
+        extract_test_snippets.main()
