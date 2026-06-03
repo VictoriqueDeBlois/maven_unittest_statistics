@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 from unittest.mock import patch
@@ -235,6 +236,85 @@ def _sort_candidates(rows: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def _read_project_exclude_file(path: Path | None) -> set[str]:
+    if not path:
+        return set()
+    projects: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        projects.update(item.strip() for item in re.split(r"[,;\s]+", line) if item.strip())
+    return projects
+
+
+def _find_duplicate_tests(tests: pd.DataFrame) -> pd.DataFrame:
+    duplicate_rows = tests[
+        tests.duplicated(["project_name", "test_full_name"], keep=False)
+    ].copy()
+    if duplicate_rows.empty:
+        return duplicate_rows
+
+    duplicate_summary = (
+        duplicate_rows.groupby(["project_name", "test_full_name"], dropna=False)
+        .size()
+        .reset_index(name="duplicate_count")
+        .sort_values(["project_name", "test_full_name"])
+    )
+    return duplicate_summary
+
+
+def _write_exclusion_log(
+    output_dir: Path,
+    duplicate_summary: pd.DataFrame,
+    manual_excluded_projects: set[str],
+    repair_dropped_projects: set[str] | None = None,
+) -> None:
+    lines = []
+    duplicate_projects = (
+        sorted(set(duplicate_summary["project_name"].astype(str)))
+        if not duplicate_summary.empty
+        else []
+    )
+
+    lines.append(f"duplicate_test_project_count={len(duplicate_projects)}")
+    lines.append(f"duplicate_test_full_name_count={len(duplicate_summary)}")
+    lines.append(f"duplicate_test_rows_removed={int(duplicate_summary['duplicate_count'].sum()) if not duplicate_summary.empty else 0}")
+    lines.append(f"manual_excluded_project_count={len(manual_excluded_projects)}")
+    if repair_dropped_projects is not None:
+        lines.append(f"repair_dropped_project_count={len(repair_dropped_projects)}")
+    lines.append("")
+
+    if duplicate_projects:
+        lines.append("[removed_duplicate_test_full_names]")
+        for project in duplicate_projects:
+            project_dups = duplicate_summary[duplicate_summary["project_name"] == project]
+            examples = [
+                f"{row.test_full_name} x{row.duplicate_count}"
+                for row in project_dups.head(5).itertuples(index=False)
+            ]
+            suffix = f"; examples: {' | '.join(examples)}" if examples else ""
+            removed_rows = int(project_dups["duplicate_count"].sum())
+            lines.append(f"{project}: duplicate_test_names={len(project_dups)}, rows_removed={removed_rows}{suffix}")
+        lines.append("")
+
+    if manual_excluded_projects:
+        lines.append("[manual_excluded_projects]")
+        lines.extend(sorted(manual_excluded_projects))
+        lines.append("")
+
+    if repair_dropped_projects:
+        lines.append("[repair_dropped_projects]")
+        lines.extend(sorted(repair_dropped_projects))
+        lines.append("")
+
+    (output_dir / "excluded_projects.log").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _project_order(series: pd.Series) -> list[str]:
+    return list(dict.fromkeys(series.astype(str).tolist()))
+
+
 def _balanced_pick(
     rows: pd.DataFrame,
     quota: int,
@@ -392,6 +472,7 @@ def _select_representative_projects(
     target_projects: int,
     tests_per_project: int,
     max_huge_projects: int,
+    initial_size_counts: Counter[str] | None = None,
 ) -> list[str]:
     project_rows = []
     for (project_name, domain, size), group in candidates.groupby(
@@ -443,7 +524,7 @@ def _select_representative_projects(
     selected: list[str] = []
     selected_set: set[str] = set()
     cell_counts: Counter[tuple[str, str]] = Counter()
-    size_counts: Counter[str] = Counter()
+    size_counts: Counter[str] = Counter(initial_size_counts or {})
 
     while len(selected) < target_projects:
         progress = False
@@ -494,45 +575,27 @@ def _pick_tests_for_projects(
     return pd.concat(selected_groups, ignore_index=True)
 
 
-def build_balanced_benchmark(
+def _prepare_candidates(
     all_tests_csv: Path,
-    projects_csv: Path,
-    commit_times_csv: Path,
-    output_dir: Path,
-    target_count: int | None = None,
-    target_projects: int = 50,
-    tests_per_project: int = 5,
-    min_count: int = 200,
-    max_count: int = 400,
-    min_packages: int = 5,
-    max_per_project: int = 8,
-    min_llm_confidence: float = 0.70,
-    max_compile_time_seconds: int = 1800,
-    max_huge_projects: int = 6,
-    excluded_size_levels: set[str] | None = None,
-) -> pd.DataFrame:
-    if target_count is not None and not (min_count <= target_count <= max_count):
-        raise ValueError(f"target_count must be between {min_count} and {max_count}")
-    if not (min_count <= target_projects * tests_per_project <= max_count):
-        raise ValueError(
-            "target_projects * tests_per_project should be within the requested range "
-            f"({min_count}-{max_count}); got {target_projects * tests_per_project}"
-        )
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    projects = _read_projects(projects_csv, commit_times_csv)
-    valid_projects = _valid_projects(projects, min_llm_confidence)
-    excluded_size_levels = excluded_size_levels or set()
-    valid_projects = valid_projects[
-        ~valid_projects["compile_size_level"].astype(str).str.lower().isin(excluded_size_levels)
-        & (valid_projects["estimated_compile_time_seconds"] <= max_compile_time_seconds)
-    ].copy()
-
+    valid_projects: pd.DataFrame,
+    min_packages: int,
+    excluded_projects: set[str],
+) -> tuple[pd.DataFrame, pd.DataFrame, set[str]]:
     tests = pd.read_csv(all_tests_csv)
+    duplicate_summary = _find_duplicate_tests(tests)
+    if not duplicate_summary.empty:
+        duplicate_index = pd.MultiIndex.from_frame(duplicate_summary[["project_name", "test_full_name"]])
+        tests_index = pd.MultiIndex.from_frame(tests[["project_name", "test_full_name"]])
+        tests = tests[~tests_index.isin(duplicate_index)].copy()
+    excluded_projects = set(excluded_projects)
+
     tests["called_packages_count"] = pd.to_numeric(tests["called_packages_count"], errors="coerce").fillna(0).astype(int)
     tests["uses_mock_norm"] = tests["uses_mock"].astype(str).str.strip().str.lower()
-    tests = tests[(tests["uses_mock_norm"] != "true") & (tests["called_packages_count"] >= min_packages)].copy()
+    tests = tests[
+        (tests["uses_mock_norm"] != "true")
+        & (tests["called_packages_count"] >= min_packages)
+        & ~tests["project_name"].astype(str).isin(excluded_projects)
+    ].copy()
     tests = tests.drop(columns=["uses_mock_norm"])
 
     project_cols = [
@@ -562,14 +625,114 @@ def build_balanced_benchmark(
     candidates["difficulty"] = [item[0] for item in difficulty]
     candidates["difficulty_score"] = [item[1] for item in difficulty]
     candidates = _add_keyword_columns(_sort_candidates(candidates))
+    return candidates, duplicate_summary, excluded_projects
 
-    selected_projects = _select_representative_projects(
-        candidates,
-        target_projects,
-        tests_per_project,
-        max_huge_projects=max_huge_projects,
+
+def _repair_existing_selection(
+    existing_csv: Path,
+    candidates: pd.DataFrame,
+    excluded_projects: set[str],
+    target_projects: int,
+    tests_per_project: int,
+    max_huge_projects: int,
+) -> tuple[pd.DataFrame, set[str]]:
+    existing = pd.read_csv(existing_csv)
+    candidate_projects = set(candidates["project_name"].astype(str))
+    original_projects = set(existing["project_name"].astype(str))
+    keep_mask = (
+        ~existing["project_name"].astype(str).isin(excluded_projects)
+        & existing["project_name"].astype(str).isin(candidate_projects)
     )
-    selected_df = _pick_tests_for_projects(candidates, selected_projects, tests_per_project)
+    kept = existing[keep_mask].copy()
+    dropped_projects = original_projects - set(kept["project_name"].astype(str))
+
+    kept_projects = set(kept["project_name"].astype(str))
+    initial_size_counts = Counter(
+        kept.drop_duplicates("project_name")["project_compile_size_level"].astype(str)
+    )
+    remaining_project_slots = max(0, target_projects - len(kept_projects))
+
+    if remaining_project_slots > 0:
+        remaining_candidates = candidates[
+            ~candidates["project_name"].astype(str).isin(kept_projects | excluded_projects)
+        ].copy()
+        supplement_projects = _select_representative_projects(
+            remaining_candidates,
+            remaining_project_slots,
+            tests_per_project,
+            max_huge_projects=max_huge_projects,
+            initial_size_counts=initial_size_counts,
+        )
+        supplement = _pick_tests_for_projects(remaining_candidates, supplement_projects, tests_per_project)
+        if not supplement.empty:
+            kept = pd.concat([kept, supplement], ignore_index=True)
+
+    return kept, dropped_projects
+
+
+def build_balanced_benchmark(
+    all_tests_csv: Path,
+    projects_csv: Path,
+    commit_times_csv: Path,
+    output_dir: Path,
+    exclude_projects_file: Path | None = None,
+    repair_from_csv: Path | None = None,
+    target_count: int | None = None,
+    target_projects: int = 50,
+    tests_per_project: int = 5,
+    min_count: int = 200,
+    max_count: int = 400,
+    min_packages: int = 5,
+    max_per_project: int = 8,
+    min_llm_confidence: float = 0.70,
+    max_compile_time_seconds: int = 1800,
+    max_huge_projects: int = 6,
+    excluded_size_levels: set[str] | None = None,
+) -> pd.DataFrame:
+    if target_count is not None and not (min_count <= target_count <= max_count):
+        raise ValueError(f"target_count must be between {min_count} and {max_count}")
+    if not (min_count <= target_projects * tests_per_project <= max_count):
+        raise ValueError(
+            "target_projects * tests_per_project should be within the requested range "
+            f"({min_count}-{max_count}); got {target_projects * tests_per_project}"
+        )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manual_excluded_projects = _read_project_exclude_file(exclude_projects_file)
+
+    projects = _read_projects(projects_csv, commit_times_csv)
+    valid_projects = _valid_projects(projects, min_llm_confidence)
+    excluded_size_levels = excluded_size_levels or set()
+    valid_projects = valid_projects[
+        ~valid_projects["compile_size_level"].astype(str).str.lower().isin(excluded_size_levels)
+        & (valid_projects["estimated_compile_time_seconds"] <= max_compile_time_seconds)
+    ].copy()
+
+    candidates, duplicate_summary, excluded_projects = _prepare_candidates(
+        all_tests_csv,
+        valid_projects,
+        min_packages,
+        manual_excluded_projects,
+    )
+
+    repair_dropped_projects: set[str] | None = None
+    if repair_from_csv:
+        selected_df, repair_dropped_projects = _repair_existing_selection(
+            repair_from_csv,
+            candidates,
+            excluded_projects,
+            target_projects,
+            tests_per_project,
+            max_huge_projects,
+        )
+    else:
+        selected_projects = _select_representative_projects(
+            candidates,
+            target_projects,
+            tests_per_project,
+            max_huge_projects=max_huge_projects,
+        )
+        selected_df = _pick_tests_for_projects(candidates, selected_projects, tests_per_project)
 
     if len(selected_df) > max_count:
         selected_df = selected_df.head(max_count)
@@ -581,6 +744,7 @@ def build_balanced_benchmark(
         by=["difficulty_score", "called_packages_count", "project_domain", "project_name", "test_full_name"],
         ascending=[True, True, True, True, True],
     )
+    _write_exclusion_log(output_dir, duplicate_summary, manual_excluded_projects, repair_dropped_projects)
 
     selected_csv = output_dir / "balanced_tests.csv"
     selected_df.to_csv(selected_csv, index=False, quoting=csv.QUOTE_MINIMAL)
@@ -623,6 +787,11 @@ def build_balanced_benchmark(
         f"selected_domains={selected_df['project_domain'].nunique()}",
         f"min_packages={min_packages}",
         f"exclude_mock=true",
+        f"duplicate_test_projects_seen={duplicate_summary['project_name'].nunique() if not duplicate_summary.empty else 0}",
+        f"duplicate_test_full_names_removed={len(duplicate_summary)}",
+        f"duplicate_test_rows_removed={int(duplicate_summary['duplicate_count'].sum()) if not duplicate_summary.empty else 0}",
+        f"manual_excluded_projects={len(manual_excluded_projects)}",
+        f"repair_from_csv={repair_from_csv or ''}",
         f"target_projects={target_projects}",
         f"tests_per_project={tests_per_project}",
         f"max_compile_time_seconds={max_compile_time_seconds}",
@@ -679,6 +848,18 @@ def main() -> int:
     parser.add_argument("--projects", default="projects_stats.csv", help="Input project statistics CSV")
     parser.add_argument("--commits", default="repo_commit_times.csv", help="Input repo commit time CSV")
     parser.add_argument("--output-dir", default="balanced_benchmark", help="Output directory")
+    parser.add_argument(
+        "--exclude-projects",
+        type=Path,
+        default=None,
+        help="Text file listing owner/repo projects to exclude; supports whitespace, comma, semicolon, and # comments.",
+    )
+    parser.add_argument(
+        "--repair-from-csv",
+        type=Path,
+        default=None,
+        help="Existing selected benchmark CSV to keep where possible, dropping excluded projects and supplementing replacements.",
+    )
     parser.add_argument("--target-count", type=int, default=None, help="Deprecated: exact test target is no longer used by default")
     parser.add_argument("--target-projects", type=int, default=50, help="Target representative project count")
     parser.add_argument("--tests-per-project", type=int, default=5, help="Tests selected from each representative project")
@@ -711,6 +892,8 @@ def main() -> int:
         projects_csv=Path(args.projects),
         commit_times_csv=Path(args.commits),
         output_dir=output_dir,
+        exclude_projects_file=args.exclude_projects,
+        repair_from_csv=args.repair_from_csv,
         target_count=args.target_count,
         target_projects=args.target_projects,
         tests_per_project=args.tests_per_project,

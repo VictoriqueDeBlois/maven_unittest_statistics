@@ -1,3 +1,5 @@
+import shutil
+
 import maven_test_metrics
 import extract_test_snippets
 import run_maven_tests
@@ -125,6 +127,17 @@ def build_integration_benchmark(
     print(f"{'='*60}")
 
 
+def build_balanced_benchmark():
+    import build_balanced_benchmark
+    args = [
+        '--projects', 'projects_stats_refined.csv',
+        '--output-dir', 'balanced_benchmark_representative',
+        '--exclude-projects', 'bad_projects.txt'
+    ]
+
+    with patch('sys.argv', ['main.py'] + args):
+        build_balanced_benchmark.main()
+
 if __name__ == '__main__':
     # args = [
     #     '--projects', 'integration_benchmark_v7_n5_project_names.txt',
@@ -136,7 +149,12 @@ if __name__ == '__main__':
     # with patch('sys.argv', ['main.py'] + args):
     #     run_maven_tests.main()
     # 步骤 4：提取代码
-    print(f"\n[步骤 4/4] 提取代码")
+
+    # build_balanced_benchmark()
+    #
+    shutil.rmtree('balanced_benchmark_representative/testcases')
+
+    print(f"\n[步骤] 提取代码")
     benchmark_csv = 'balanced_benchmark_representative/balanced_tests.csv'
 
     args = [
