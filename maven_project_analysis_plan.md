@@ -1,5 +1,10 @@
 # Codex 实现计划：批量统计 Maven 项目规模、类型与编译时间估计
 
+> 当前主流程已实现为 `run_balanced_benchmark_pipeline.py`。
+> 项目统计 CSV 默认写到 `data/intermediate/projects_stats_refined.csv`，
+> 项目分析日志默认写到 `logs/maven_project_run_refined.log`。
+> 本文保留为实现背景和字段设计参考。
+
 ## 1. 目标
 
 实现一个 Python 脚本，用于批量分析本地已经 clone 下来的 Maven Java 项目。
@@ -37,7 +42,7 @@ projects_root/
 ```bash
 python analyze_maven_projects.py \
   --projects-root /path/to/projects_root \
-  --output-csv /path/to/output/projects_stats.csv \
+  --output-csv data/intermediate/projects_stats_refined.csv \
   --log-file /path/to/output/run.log
 ```
 
@@ -1064,7 +1069,7 @@ write_csv(rows, output_csv)
 ```bash
 python analyze_maven_projects.py \
   --projects-root ./projects_root \
-  --output-csv ./output/projects_stats.csv \
+  --output-csv data/intermediate/projects_stats_refined.csv \
   --log-file ./output/run.log
 ```
 
@@ -1095,7 +1100,7 @@ Web 后端
 10. 最终输出只有：
 
 ```text
-projects_stats.csv
+data/intermediate/projects_stats.csv
 run.log
 ```
 

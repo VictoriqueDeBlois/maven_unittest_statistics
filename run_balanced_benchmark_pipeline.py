@@ -2,10 +2,10 @@
 """运行 representative benchmark 的完整可恢复流水线。
 
 总体流程：
-  1. all_repos.txt + 本地仓库 -> all_tests_jar.csv
-  2. 本地仓库 -> projects_stats_refined.csv
-  3. all_tests_jar.csv + 本地仓库 -> repo_commit_times.csv
-  4. 三个 CSV + bad_projects.txt -> balanced_benchmark_representative/*.csv
+  1. data/input/all_repos.txt + 本地仓库 -> data/intermediate/all_tests_jar.csv
+  2. 本地仓库 -> data/intermediate/projects_stats_refined.csv
+  3. all_tests_jar.csv + 本地仓库 -> data/intermediate/repo_commit_times.csv
+  4. 三个 CSV + data/input/bad_projects.txt -> outputs/balanced_benchmark_representative/
   5. balanced_tests.csv + 本地仓库 -> annotated/raw Java 测试代码
 
 每一步都会先检查自己的目标产物。目标产物已经存在且非空时，会自动跳过；
@@ -27,6 +27,10 @@ import maven_test_metrics_jar
 
 DEFAULT_JAR = "/data/xuhaoran/idea/maven-test-metrics-java/target/maven-test-metrics-1.0-SNAPSHOT.jar"
 DEFAULT_PROJECTS_ROOT = "/data/xuhaoran/github"
+DEFAULT_INPUT_DIR = Path("data/input")
+DEFAULT_INTERMEDIATE_DIR = Path("data/intermediate")
+DEFAULT_LOG_DIR = Path("logs")
+DEFAULT_OUTPUT_DIR = Path("outputs/balanced_benchmark_representative")
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,17 +40,17 @@ def parse_args() -> argparse.Namespace:
             "默认跳过已经存在的中间产物。"
         )
     )
-    parser.add_argument("--projects-list", default="all_repos.txt")
+    parser.add_argument("--projects-list", default=str(DEFAULT_INPUT_DIR / "all_repos.txt"))
     parser.add_argument("--projects-root", default=DEFAULT_PROJECTS_ROOT)
-    parser.add_argument("--all-tests-csv", default="all_tests_jar.csv")
-    parser.add_argument("--projects-csv", default="projects_stats_refined.csv")
-    parser.add_argument("--projects-log", default="maven_project_run_refined.log")
+    parser.add_argument("--all-tests-csv", default=str(DEFAULT_INTERMEDIATE_DIR / "all_tests_jar.csv"))
+    parser.add_argument("--projects-csv", default=str(DEFAULT_INTERMEDIATE_DIR / "projects_stats_refined.csv"))
+    parser.add_argument("--projects-log", default=str(DEFAULT_LOG_DIR / "maven_project_run_refined.log"))
     parser.add_argument("--reuse-llm-csv", default=None)
     parser.add_argument("--reuse-stats-csv", default=None)
     parser.add_argument("--skip-llm", action="store_true")
-    parser.add_argument("--commits-csv", default="repo_commit_times.csv")
-    parser.add_argument("--exclude-projects", default="bad_projects.txt")
-    parser.add_argument("--output-dir", default="balanced_benchmark_representative")
+    parser.add_argument("--commits-csv", default=str(DEFAULT_INTERMEDIATE_DIR / "repo_commit_times.csv"))
+    parser.add_argument("--exclude-projects", default=str(DEFAULT_INPUT_DIR / "bad_projects.txt"))
+    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--jar", default=DEFAULT_JAR)
     parser.add_argument("--metrics-workers", type=int, default=20)
     parser.add_argument("--extract-workers", type=int, default=20)
@@ -127,7 +131,7 @@ def run_metrics(args: argparse.Namespace) -> None:
       - args.jar：Java 侧测试指标分析 jar。
 
     输出：
-      - args.all_tests_csv，默认 all_tests_jar.csv。
+      - args.all_tests_csv，默认 data/intermediate/all_tests_jar.csv。
       - maven_test_metrics_jar 还会在 CSV 旁边维护 workdir，用于记录
         每个项目的进度和断点续跑状态。
     """
@@ -165,8 +169,8 @@ def run_project_analysis(args: argparse.Namespace) -> None:
       - 可选 --reuse-llm-csv/--reuse-stats-csv，用于避免重复做 LLM 标注。
 
     输出：
-      - args.projects_csv，默认 projects_stats_refined.csv。
-      - args.projects_log，默认 maven_project_run_refined.log。
+      - args.projects_csv，默认 data/intermediate/projects_stats_refined.csv。
+      - args.projects_log，默认 logs/maven_project_run_refined.log。
 
     后续 balanced selector 会使用 Maven 有效性、项目类型标签、编译规模、
     预计编译时间、SLOC、LLM 置信度等字段。
@@ -202,7 +206,7 @@ def run_commit_times(args: argparse.Namespace) -> None:
       - args.projects_root：每个项目 .git 目录所在的本地仓库根目录。
 
     输出：
-      - args.commits_csv，默认 repo_commit_times.csv。
+      - args.commits_csv，默认 data/intermediate/repo_commit_times.csv。
 
     这些 commit 字段会合并进最终 benchmark CSV，保证每条选中测试都能追溯到
     当时分析的具体仓库版本。
@@ -338,9 +342,22 @@ def validate_required_inputs(args: argparse.Namespace) -> None:
         raise FileNotFoundError("Missing required input(s):\n" + "\n".join(missing))
 
 
+def prepare_directories(args: argparse.Namespace) -> None:
+    """提前创建统一目录，避免各步骤写文件时父目录不存在。"""
+    for path in [
+        Path(args.all_tests_csv).parent,
+        Path(args.projects_csv).parent,
+        Path(args.projects_log).parent,
+        Path(args.commits_csv).parent,
+        Path(args.output_dir),
+    ]:
+        path.mkdir(parents=True, exist_ok=True)
+
+
 def main() -> int:
     args = parse_args()
     validate_required_inputs(args)
+    prepare_directories(args)
 
     # 顺序不能换：后面的步骤会读取前面步骤生成的文件。
     run_metrics(args)

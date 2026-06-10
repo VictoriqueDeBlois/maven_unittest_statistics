@@ -1,22 +1,30 @@
-# balanced_benchmark_representative 生成流程说明
+# outputs/balanced_benchmark_representative 生成流程说明
 
-本文档说明当前脚本如何生成 `balanced_benchmark_representative`，以及它的筛选和抽样机制。核心逻辑在 `build_balanced_benchmark.py`，`main.py` 中的 `build_balanced_benchmark()` 只是固定参数调用入口。
+本文档说明当前主流程如何生成 `outputs/balanced_benchmark_representative`，以及它的筛选和抽样机制。当前推荐入口是 `run_balanced_benchmark_pipeline.py`，核心筛选逻辑在 `build_balanced_benchmark.py`。
 
 ## 1. 当前入口和参数
 
-`main.py` 中的调用参数是：
+推荐直接运行完整流水线：
 
 ```bash
-python build_balanced_benchmark.py \
-  --projects projects_stats_refined.csv \
-  --output-dir balanced_benchmark_representative \
-  --exclude-projects bad_projects.txt
+uv run python run_balanced_benchmark_pipeline.py
+```
+
+如果只想运行 benchmark 筛选这一步，等价调用是：
+
+```bash
+uv run python build_balanced_benchmark.py \
+  --tests data/intermediate/all_tests_jar.csv \
+  --projects data/intermediate/projects_stats_refined.csv \
+  --commits data/intermediate/repo_commit_times.csv \
+  --output-dir outputs/balanced_benchmark_representative \
+  --exclude-projects data/input/bad_projects.txt
 ```
 
 未显式传入的参数使用 `build_balanced_benchmark.py` 默认值：
 
-- `--tests all_tests_jar.csv`
-- `--commits repo_commit_times.csv`
+- `--tests data/intermediate/all_tests_jar.csv`
+- `--commits data/intermediate/repo_commit_times.csv`
 - `--target-projects 50`
 - `--tests-per-project 5`
 - `--min-count 200`
@@ -26,19 +34,19 @@ python build_balanced_benchmark.py \
 - `--max-compile-time-seconds 1800`
 - `--max-huge-projects 6`
 
-所以当前目标是：从有效 Maven 项目中选出 50 个代表性项目，每个项目选 5 条测试，总计 250 条测试，输出到 `balanced_benchmark_representative/`。
+所以当前目标是：从有效 Maven 项目中选出 50 个代表性项目，每个项目选 5 条测试，总计 250 条测试，输出到 `outputs/balanced_benchmark_representative/`。
 
-注意：`main.py` 里当前 `if __name__ == '__main__'` 部分把 `build_balanced_benchmark()` 调用注释掉了，实际执行的是基于已有 `balanced_benchmark_representative/balanced_tests.csv` 提取测试代码。如果要重新生成 CSV，需要取消注释或直接运行上面的命令。
+`main.py` 已归档到 `archive/legacy_code_20260610/`，不再作为当前主入口。
 
 ## 2. 输入文件
 
 生成 CSV 阶段读取三个主要输入：
 
-- `all_tests_jar.csv`：测试方法级指标，包括 `project_name`、`test_full_name`、`uses_mock`、`called_packages_count`、`called_methods_count`、`setup_length`、`assertion_count` 等。
-- `projects_stats_refined.csv`：项目级统计和 LLM 标注，包括 `owner`、`repo`、`type_label_zh`、`compile_size_level`、`estimated_compile_time_seconds`、`main_sloc`、`main_java_files`、`llm_confidence` 等。
-- `repo_commit_times.csv`：项目对应的 commit 信息，合并到最终输出。
+- `data/intermediate/all_tests_jar.csv`：测试方法级指标，包括 `project_name`、`test_full_name`、`uses_mock`、`called_packages_count`、`called_methods_count`、`setup_length`、`assertion_count` 等。
+- `data/intermediate/projects_stats_refined.csv`：项目级统计和 LLM 标注，包括 `owner`、`repo`、`type_label_zh`、`compile_size_level`、`estimated_compile_time_seconds`、`main_sloc`、`main_java_files`、`llm_confidence` 等。
+- `data/intermediate/repo_commit_times.csv`：项目对应的 commit 信息，合并到最终输出。
 
-此外，`bad_projects.txt` 是人工排除列表，当前输出记录显示排除了 1 个项目：`aws/aws-sdk-java-v2`。
+此外，`data/input/bad_projects.txt` 是人工排除列表，当前输出记录显示排除了 1 个项目：`aws/aws-sdk-java-v2`。
 
 ## 3. 总体生成流程
 
@@ -114,7 +122,7 @@ python build_balanced_benchmark.py \
 3. 排除调用包数量不足的测试：
    - `called_packages_count < 5` 的测试会被排除。
 4. 排除人工黑名单项目：
-   - `project_name` 出现在 `bad_projects.txt` 中的测试会被排除。
+   - `project_name` 出现在 `data/input/bad_projects.txt` 中的测试会被排除。
 5. 只保留能匹配到有效项目的测试：
    - 测试表和有效项目表按 `project_name` 做 inner join。
 
@@ -197,7 +205,7 @@ python build_balanced_benchmark.py \
 
 ## 10. 当前输出结果
 
-当前 `balanced_benchmark_representative/summary.txt` 显示：
+当前 `outputs/balanced_benchmark_representative/summary.txt` 显示：
 
 - 选中测试数：250
 - 选中项目数：50
@@ -249,7 +257,7 @@ python build_balanced_benchmark.py \
 
 ## 11. 输出文件
 
-`balanced_benchmark_representative/` 下主要产物：
+`outputs/balanced_benchmark_representative/` 下主要产物：
 
 - `balanced_tests.csv`：最终 250 条测试。
 - `balanced_tests_easy.csv`、`balanced_tests_medium.csv`、`balanced_tests_hard.csv`、`balanced_tests_expert.csv`：按难度拆分。
@@ -267,7 +275,7 @@ python build_balanced_benchmark.py \
 - 重复测试处理比较严格：发现同一项目内同一 `test_full_name` 重复时，会删除该重复测试名的所有记录。
 - 集成测试关键词匹配只生成 `has_keyword` 和 `matched_keyword` 标注，不决定测试是否被选中。
 
-## 13. 一步一步运行生成 balanced_benchmark_representative
+## 13. 一步一步运行生成 outputs/balanced_benchmark_representative
 
 ### 13.1 推荐调用方式
 
@@ -279,12 +287,12 @@ uv run python run_balanced_benchmark_pipeline.py
 
 它会按顺序检查并生成：
 
-1. `all_tests_jar.csv`
-2. `projects_stats_refined.csv`
-3. `repo_commit_times.csv`
-4. `balanced_benchmark_representative/balanced_tests.csv`
-5. `balanced_benchmark_representative/testcases/annotated/`
-6. `balanced_benchmark_representative/testcases/raw_java/`
+1. `data/intermediate/all_tests_jar.csv`
+2. `data/intermediate/projects_stats_refined.csv`
+3. `data/intermediate/repo_commit_times.csv`
+4. `outputs/balanced_benchmark_representative/balanced_tests.csv`
+5. `outputs/balanced_benchmark_representative/testcases/annotated/`
+6. `outputs/balanced_benchmark_representative/testcases/raw_java/`
 
 每一步的目标产物如果已经存在且非空，就会自动跳过。可以先用 dry-run 查看计划：
 
@@ -310,30 +318,16 @@ uv run python run_balanced_benchmark_pipeline.py --force-step benchmark
 uv run python run_balanced_benchmark_pipeline.py --skip-extract
 ```
 
-不要直接依赖当前 `main.py` 生成 CSV。当前 `main.py` 的主入口里，`build_balanced_benchmark()` 是注释掉的，实际执行的是：
-
-1. 删除 `balanced_benchmark_representative/testcases`
-2. 从已有的 `balanced_benchmark_representative/balanced_tests.csv` 抽取 annotated 代码
-3. 从同一个 CSV 抽取 raw Java 代码
-
-也就是说，当前直接运行：
-
-```bash
-uv run python main.py
-```
-
-不会重新生成 `balanced_tests.csv`，只会基于已有 CSV 重新提取代码。
-
-推荐把生成 CSV 和提取代码拆开手动调用，流程更清楚。
+旧的 `main.py` 已归档，不再作为入口。当前需要从 `run_balanced_benchmark_pipeline.py` 进入，或按下面的单步命令手动运行。
 
 ### 13.2 最短路径：已有中间产物时重新生成 benchmark
 
 如果下面文件已经存在：
 
-- `all_tests_jar.csv`
-- `projects_stats_refined.csv`
-- `repo_commit_times.csv`
-- `bad_projects.txt`
+- `data/intermediate/all_tests_jar.csv`
+- `data/intermediate/projects_stats_refined.csv`
+- `data/intermediate/repo_commit_times.csv`
+- `data/input/bad_projects.txt`
 - 本地项目源码根目录 `/data/xuhaoran/github`
 - Java 分析 jar `/data/xuhaoran/idea/maven-test-metrics-java/target/maven-test-metrics-1.0-SNAPSHOT.jar`
 
@@ -343,32 +337,32 @@ uv run python main.py
 
 ```bash
 uv run python build_balanced_benchmark.py \
-  --tests all_tests_jar.csv \
-  --projects projects_stats_refined.csv \
-  --commits repo_commit_times.csv \
-  --output-dir balanced_benchmark_representative \
-  --exclude-projects bad_projects.txt
+  --tests data/intermediate/all_tests_jar.csv \
+  --projects data/intermediate/projects_stats_refined.csv \
+  --commits data/intermediate/repo_commit_times.csv \
+  --output-dir outputs/balanced_benchmark_representative \
+  --exclude-projects data/input/bad_projects.txt
 ```
 
 这一步会生成：
 
-- `balanced_benchmark_representative/balanced_tests.csv`
-- `balanced_benchmark_representative/balanced_tests_easy.csv`
-- `balanced_benchmark_representative/balanced_tests_medium.csv`
-- `balanced_benchmark_representative/balanced_tests_hard.csv`
-- `balanced_benchmark_representative/balanced_tests_expert.csv`
-- `balanced_benchmark_representative/selected_projects.csv`
-- `balanced_benchmark_representative/summary.txt`
-- `balanced_benchmark_representative/excluded_projects.log`
-- `balanced_benchmark_representative/charts/`
+- `outputs/balanced_benchmark_representative/balanced_tests.csv`
+- `outputs/balanced_benchmark_representative/balanced_tests_easy.csv`
+- `outputs/balanced_benchmark_representative/balanced_tests_medium.csv`
+- `outputs/balanced_benchmark_representative/balanced_tests_hard.csv`
+- `outputs/balanced_benchmark_representative/balanced_tests_expert.csv`
+- `outputs/balanced_benchmark_representative/selected_projects.csv`
+- `outputs/balanced_benchmark_representative/summary.txt`
+- `outputs/balanced_benchmark_representative/excluded_projects.log`
+- `outputs/balanced_benchmark_representative/charts/`
 
 第二步，提取带标注版本测试代码：
 
 ```bash
 uv run python extract_test_snippets.py \
-  --csv balanced_benchmark_representative/balanced_tests.csv \
+  --csv outputs/balanced_benchmark_representative/balanced_tests.csv \
   --root /data/xuhaoran/github \
-  --output balanced_benchmark_representative/testcases/annotated \
+  --output outputs/balanced_benchmark_representative/testcases/annotated \
   --mode all \
   --workers 20 \
   --jar /data/xuhaoran/idea/maven-test-metrics-java/target/maven-test-metrics-1.0-SNAPSHOT.jar \
@@ -379,9 +373,9 @@ uv run python extract_test_snippets.py \
 
 ```bash
 uv run python extract_test_snippets.py \
-  --csv balanced_benchmark_representative/balanced_tests.csv \
+  --csv outputs/balanced_benchmark_representative/balanced_tests.csv \
   --root /data/xuhaoran/github \
-  --output balanced_benchmark_representative/testcases/raw_java \
+  --output outputs/balanced_benchmark_representative/testcases/raw_java \
   --mode all \
   --workers 20 \
   --jar /data/xuhaoran/idea/maven-test-metrics-java/target/maven-test-metrics-1.0-SNAPSHOT.jar \
@@ -391,7 +385,7 @@ uv run python extract_test_snippets.py \
 跑完后，完整目录就是：
 
 ```text
-balanced_benchmark_representative/
+outputs/balanced_benchmark_representative/
   balanced_tests.csv
   balanced_tests_easy.csv
   balanced_tests_medium.csv
@@ -406,67 +400,48 @@ balanced_benchmark_representative/
     raw_java/
 ```
 
-### 13.3 如果要用 main.py 的封装函数
-
-`main.py` 里已经有一个函数：
-
-```python
-def build_balanced_benchmark():
-    import build_balanced_benchmark
-    args = [
-        '--projects', 'projects_stats_refined.csv',
-        '--output-dir', 'balanced_benchmark_representative',
-        '--exclude-projects', 'bad_projects.txt'
-    ]
-```
-
-这个函数等价于调用：
+### 13.3 只运行 benchmark 筛选
 
 ```bash
 uv run python build_balanced_benchmark.py \
-  --projects projects_stats_refined.csv \
-  --output-dir balanced_benchmark_representative \
-  --exclude-projects bad_projects.txt
+  --tests data/intermediate/all_tests_jar.csv \
+  --projects data/intermediate/projects_stats_refined.csv \
+  --commits data/intermediate/repo_commit_times.csv \
+  --output-dir outputs/balanced_benchmark_representative \
+  --exclude-projects data/input/bad_projects.txt
 ```
 
-因为 `build_balanced_benchmark.py` 有默认参数，所以它会默认读取：
+如果只改了筛选参数或黑名单，可以只重跑这一步；如果使用完整流水线，也可以运行：
 
-- `--tests all_tests_jar.csv`
-- `--commits repo_commit_times.csv`
-
-如果想通过 `main.py` 一键生成 CSV，需要把 `main.py` 里的这一行取消注释：
-
-```python
-# build_balanced_benchmark()
+```bash
+uv run python run_balanced_benchmark_pipeline.py --force-step benchmark --skip-extract
 ```
-
-但更稳妥的方式还是直接运行 `build_balanced_benchmark.py`，因为命令行参数一眼能看清楚。
 
 ### 13.4 从更早阶段重建中间产物
 
 通常不需要每次重建这些中间产物。如果缺失或源码发生了大规模更新，再按下面顺序重建。
 
-第一步，重新生成测试指标总表 `all_tests_jar.csv`：
+第一步，重新生成测试指标总表 `data/intermediate/all_tests_jar.csv`：
 
 ```bash
 uv run python maven_test_metrics_jar.py \
-  --projects all_repos.txt \
+  --projects data/input/all_repos.txt \
   --root /data/xuhaoran/github \
-  --output all_tests_jar.csv \
+  --output data/intermediate/all_tests_jar.csv \
   --workers 20 \
   --jar /data/xuhaoran/idea/maven-test-metrics-java/target/maven-test-metrics-1.0-SNAPSHOT.jar \
   --timeout 1800
 ```
 
-这一步扫描所有仓库测试，产出测试方法级指标。`balanced_benchmark_representative` 的测试筛选就是从这个 CSV 开始。
+这一步扫描所有仓库测试，产出测试方法级指标。`outputs/balanced_benchmark_representative` 的测试筛选就是从这个 CSV 开始。
 
-第二步，重新生成项目统计 `projects_stats_refined.csv`：
+第二步，重新生成项目统计 `data/intermediate/projects_stats_refined.csv`：
 
 ```bash
 uv run python analyze_maven_projects.py \
   --projects-root /data/xuhaoran/github \
-  --output-csv projects_stats_refined.csv \
-  --log-file maven_project_run_refined.log
+  --output-csv data/intermediate/projects_stats_refined.csv \
+  --log-file logs/maven_project_run_refined.log
 ```
 
 这一步会做项目结构统计和 LLM 类型标注。如果已有旧的 `projects_stats.csv`，并且只想复用已有 LLM 标签，可以改用：
@@ -474,21 +449,21 @@ uv run python analyze_maven_projects.py \
 ```bash
 uv run python analyze_maven_projects.py \
   --projects-root /data/xuhaoran/github \
-  --output-csv projects_stats_refined.csv \
-  --log-file maven_project_run_refined.log \
-  --reuse-llm-csv projects_stats.csv
+  --output-csv data/intermediate/projects_stats_refined.csv \
+  --log-file logs/maven_project_run_refined.log \
+  --reuse-llm-csv data/intermediate/projects_stats.csv
 ```
 
-第三步，重新生成 commit 信息 `repo_commit_times.csv`：
+第三步，重新生成 commit 信息 `data/intermediate/repo_commit_times.csv`：
 
 ```bash
-uv run python -c "import get_repo_commit_times; get_repo_commit_times.main(csv_path='all_tests_jar.csv', repos_root='/data/xuhaoran/github', output_csv='repo_commit_times.csv')"
+uv run python -c "import get_repo_commit_times; get_repo_commit_times.main(csv_path='data/intermediate/all_tests_jar.csv', repos_root='/data/xuhaoran/github', output_csv='data/intermediate/repo_commit_times.csv')"
 ```
 
 第四步，维护人工排除项目：
 
 ```text
-bad_projects.txt
+data/input/bad_projects.txt
 ```
 
 每行写一个 `owner/repo`。当前内容是：
@@ -502,37 +477,37 @@ aws/aws-sdk-java-v2
 ### 13.5 当前完整链路图
 
 ```text
-all_repos.txt
+data/input/all_repos.txt
   -> maven_test_metrics_jar.py
-  -> all_tests_jar.csv
+  -> data/intermediate/all_tests_jar.csv
 
 /data/xuhaoran/github
   -> analyze_maven_projects.py
-  -> projects_stats_refined.csv
+  -> data/intermediate/projects_stats_refined.csv
 
-all_tests_jar.csv + /data/xuhaoran/github
+data/intermediate/all_tests_jar.csv + /data/xuhaoran/github
   -> get_repo_commit_times.py
-  -> repo_commit_times.csv
+  -> data/intermediate/repo_commit_times.csv
 
-all_tests_jar.csv
-projects_stats_refined.csv
-repo_commit_times.csv
-bad_projects.txt
+data/intermediate/all_tests_jar.csv
+data/intermediate/projects_stats_refined.csv
+data/intermediate/repo_commit_times.csv
+data/input/bad_projects.txt
   -> build_balanced_benchmark.py
-  -> balanced_benchmark_representative/balanced_tests.csv
-  -> balanced_benchmark_representative/summary.txt
-  -> balanced_benchmark_representative/selected_projects.csv
-  -> balanced_benchmark_representative/charts/
+  -> outputs/balanced_benchmark_representative/balanced_tests.csv
+  -> outputs/balanced_benchmark_representative/summary.txt
+  -> outputs/balanced_benchmark_representative/selected_projects.csv
+  -> outputs/balanced_benchmark_representative/charts/
 
-balanced_benchmark_representative/balanced_tests.csv
+outputs/balanced_benchmark_representative/balanced_tests.csv
 /data/xuhaoran/github
 Java metrics jar
   -> extract_test_snippets.py --format annotated
-  -> balanced_benchmark_representative/testcases/annotated/
+  -> outputs/balanced_benchmark_representative/testcases/annotated/
 
-balanced_benchmark_representative/balanced_tests.csv
+outputs/balanced_benchmark_representative/balanced_tests.csv
 /data/xuhaoran/github
 Java metrics jar
   -> extract_test_snippets.py --format raw-java
-  -> balanced_benchmark_representative/testcases/raw_java/
+  -> outputs/balanced_benchmark_representative/testcases/raw_java/
 ```

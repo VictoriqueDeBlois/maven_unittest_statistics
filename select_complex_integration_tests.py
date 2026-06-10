@@ -199,8 +199,8 @@ def select_tests(
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="复杂集成测试筛选（激进方案）")
-    parser.add_argument('--input', '-i', default='all_tests_jar.csv', help='输入CSV')
-    parser.add_argument('--output', '-o', default='selected_integration_tests.csv', help='输出CSV')
+    parser.add_argument('--input', '-i', default='data/intermediate/all_tests_jar.csv', help='输入CSV')
+    parser.add_argument('--output', '-o', default='data/intermediate/selected_integration_tests.csv', help='输出CSV')
     parser.add_argument('--min-packages', '-p', type=int, default=5, help='called_packages_count 阈值（默认5）')
     parser.add_argument('--keep-mock', action='store_true', help='保留使用mock的测试')
     args = parser.parse_args()

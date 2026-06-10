@@ -34,7 +34,7 @@ from rich.progress import (
 
 from utils.logger_manager import get_logger
 
-logger = get_logger('maven_test_metrics.log', 'TestMetrics')
+logger = get_logger('logs/maven_test_metrics.log', 'TestMetrics')
 
 # ---------------------------------------------------------------------------
 # 全局状态（用于信号处理）

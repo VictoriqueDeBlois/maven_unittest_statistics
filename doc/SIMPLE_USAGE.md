@@ -1,44 +1,44 @@
 # 简单使用说明
 
-按下面顺序调用即可：
-
-## 1. 汇总全部单测信息
-
-先用 `maven_test_metrics.py` 生成总表：
+当前推荐只使用一个入口：
 
 ```bash
-python3 maven_test_metrics.py \
-  --projects repos.txt \
-  --root /path/to/repos \
-  --output test_metrics.csv
+uv run python run_balanced_benchmark_pipeline.py
 ```
 
-## 2. 筛选名字里像集成测试的用例
+脚本会自动检查已有产物，已存在且非空的步骤会跳过。
 
-再用 `filter_integration_tests.py` 从总表里筛出集成测试：
+## 查看执行计划
 
 ```bash
-python3 filter_integration_tests.py \
-  --input test_metrics.csv \
-  --output integration_tests.csv
+uv run python run_balanced_benchmark_pipeline.py --dry-run
 ```
 
-## 3. 抽取对应测试代码
-
-最后用 `extract_test_snippets.py` 抽取筛选结果对应的测试代码：
+## 常用重跑方式
 
 ```bash
-python3 extract_test_snippets.py \
-  --csv integration_tests.csv \
-  --root /path/to/repos \
-  --output extracted_integration_tests \
-  --mode all
+# 强制全量重跑
+uv run python run_balanced_benchmark_pipeline.py --force
+
+# 只重跑 benchmark 筛选
+uv run python run_balanced_benchmark_pipeline.py --force-step benchmark
+
+# 只生成 CSV/统计，不抽取测试代码
+uv run python run_balanced_benchmark_pipeline.py --skip-extract
 ```
 
-## 说明
+## 当前目录约定
 
-- `--root` 指所有 Maven 项目的根目录。
-- `repos.txt` 里每行一个项目名，和 `maven_test_metrics.py` 的 `--root` 配合使用。
-- 第一步输出总表 `test_metrics.csv`。
-- 第二步输出筛选后的 `integration_tests.csv`。
-- 第三步会把每个测试方法保存成单独的 `.java` 文件。
+```text
+data/input/          输入列表和人工黑名单
+data/intermediate/   中间 CSV 和 workdir
+logs/                运行日志
+outputs/             最终 benchmark
+archive/             旧代码、旧产物、旧日志归档
+```
+
+最终结果位于：
+
+```text
+outputs/balanced_benchmark_representative/
+```

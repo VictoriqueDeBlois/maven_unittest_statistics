@@ -21,14 +21,15 @@ from typing import Dict, List, Optional, Tuple
 
 from tqdm import tqdm
 
-# 日志文件路径（与脚本同名）
-_LOG_FILE = Path(__file__).with_suffix('.log')
+# 日志统一写到 logs/ 目录，避免散落在项目根目录。
+_LOG_FILE = Path("logs") / f"{Path(__file__).stem}.log"
 
 
 def _setup_logger() -> logging.Logger:
     """配置日志输出到文件，避免控制台输出。"""
     log = logging.getLogger(__name__)
     if not log.handlers:
+        _LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         handler = logging.FileHandler(_LOG_FILE, encoding='utf-8')
         handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         log.addHandler(handler)

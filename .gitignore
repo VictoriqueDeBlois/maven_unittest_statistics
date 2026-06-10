@@ -33,9 +33,12 @@ ENV/
 # Large data files
 *.csv
 all_integration_tests/
+data/
+outputs/
 
 # Log files
 *.log
+logs/
 
 # Results directory (optional - uncomment if needed)
 results/
@@ -59,3 +62,7 @@ test*.py
 *.jar
 
 *benchmark*/
+
+# Local archives
+archive/legacy_outputs_*/
+archive/legacy_logs_*/

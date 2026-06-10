@@ -66,9 +66,9 @@ def get_git_commit_time(repo_path: Path) -> dict:
 
 
 def main(
-    csv_path: str = "integration_benchmark_v7_n5.csv",
+    csv_path: str = "data/intermediate/all_tests_jar.csv",
     repos_root: str = "/data/xuhaoran/github",
-    output_csv: str = "repo_commit_times.csv",
+    output_csv: str = "data/intermediate/repo_commit_times.csv",
 ):
     projects = get_unique_projects(csv_path)
     print(f"从 {csv_path} 中提取到 {len(projects)} 个唯一项目")

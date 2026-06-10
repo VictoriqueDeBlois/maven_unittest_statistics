@@ -1,5 +1,10 @@
 # Maven 测试用例指标统计工具 — 设计文档
 
+> 当前主流程入口是 `run_balanced_benchmark_pipeline.py`。
+> 主流程使用 `maven_test_metrics_jar.py` 调用 Java jar 生成指标；
+> 旧 Python AST 版 `maven_test_metrics.py` 已归档到 `archive/legacy_code_20260610/`。
+> 当前中间产物统一放在 `data/intermediate/`，日志统一放在 `logs/`，最终结果放在 `outputs/`。
+
 ## 一、工具概述
 
 本工具用于统计 Maven 项目中每个 `@Test` 方法的以下指标，输出为 CSV 文件：

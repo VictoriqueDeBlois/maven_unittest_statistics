@@ -844,10 +844,10 @@ def extract_outputs(output_dir: Path, csv_file: Path, projects_root: Path, jar_p
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build a balanced 200-400 test benchmark")
-    parser.add_argument("--tests", default="all_tests_jar.csv", help="Input all-tests CSV")
-    parser.add_argument("--projects", default="projects_stats.csv", help="Input project statistics CSV")
-    parser.add_argument("--commits", default="repo_commit_times.csv", help="Input repo commit time CSV")
-    parser.add_argument("--output-dir", default="balanced_benchmark", help="Output directory")
+    parser.add_argument("--tests", default="data/intermediate/all_tests_jar.csv", help="Input all-tests CSV")
+    parser.add_argument("--projects", default="data/intermediate/projects_stats_refined.csv", help="Input project statistics CSV")
+    parser.add_argument("--commits", default="data/intermediate/repo_commit_times.csv", help="Input repo commit time CSV")
+    parser.add_argument("--output-dir", default="outputs/balanced_benchmark", help="Output directory")
     parser.add_argument(
         "--exclude-projects",
         type=Path,

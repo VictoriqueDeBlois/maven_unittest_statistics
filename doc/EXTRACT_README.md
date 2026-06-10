@@ -1,5 +1,20 @@
 # 测试用例代码片段提取工具
 
+当前主流程会自动调用本工具，默认从：
+
+```text
+outputs/balanced_benchmark_representative/balanced_tests.csv
+```
+
+抽取到：
+
+```text
+outputs/balanced_benchmark_representative/testcases/annotated/
+outputs/balanced_benchmark_representative/testcases/raw_java/
+```
+
+通常不需要手动运行；只有在单独调试代码抽取时才直接调用 `extract_test_snippets.py`。
+
 ## 功能说明
 
 该工具用于从CSV文件中读取测试用例信息，然后从源代码仓库中提取对应的测试方法代码片段，保存到单独的文件中。
