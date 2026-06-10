@@ -271,6 +271,45 @@ python build_balanced_benchmark.py \
 
 ### 13.1 推荐调用方式
 
+现在仓库里提供了一个覆盖完整流程的入口：
+
+```bash
+uv run python run_balanced_benchmark_pipeline.py
+```
+
+它会按顺序检查并生成：
+
+1. `all_tests_jar.csv`
+2. `projects_stats_refined.csv`
+3. `repo_commit_times.csv`
+4. `balanced_benchmark_representative/balanced_tests.csv`
+5. `balanced_benchmark_representative/testcases/annotated/`
+6. `balanced_benchmark_representative/testcases/raw_java/`
+
+每一步的目标产物如果已经存在且非空，就会自动跳过。可以先用 dry-run 查看计划：
+
+```bash
+uv run python run_balanced_benchmark_pipeline.py --dry-run
+```
+
+如果要强制全量重跑：
+
+```bash
+uv run python run_balanced_benchmark_pipeline.py --force
+```
+
+如果只想重跑某一步，例如重新生成 benchmark CSV：
+
+```bash
+uv run python run_balanced_benchmark_pipeline.py --force-step benchmark
+```
+
+如果只生成 CSV 和统计文件，不抽取测试代码：
+
+```bash
+uv run python run_balanced_benchmark_pipeline.py --skip-extract
+```
+
 不要直接依赖当前 `main.py` 生成 CSV。当前 `main.py` 的主入口里，`build_balanced_benchmark()` 是注释掉的，实际执行的是：
 
 1. 删除 `balanced_benchmark_representative/testcases`
